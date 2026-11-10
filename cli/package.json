@@ -1,0 +1,34 @@
+{
+  "name": "alterlab-cli",
+  "version": "1.0.0",
+  "description": "npx shim for the AlterLab CLI (runs the PyPI `alterlab` package via uvx or pipx)",
+  "keywords": [
+    "alterlab",
+    "cli",
+    "web-scraping",
+    "npx",
+    "uvx",
+    "web-data",
+    "ai-agents"
+  ],
+  "homepage": "https://alterlab.io/docs",
+  "bugs": {
+    "url": "https://github.com/RapierCraftStudios/alterlab-sdks/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/RapierCraftStudios/alterlab-sdks.git",
+    "directory": "cli"
+  },
+  "license": "MIT",
+  "author": "AlterLab (https://alterlab.io)",
+  "bin": {
+    "alterlab": "bin/alterlab.js"
+  },
+  "files": [
+    "bin"
+  ],
+  "engines": {
+    "node": ">=18"
+  }
+}

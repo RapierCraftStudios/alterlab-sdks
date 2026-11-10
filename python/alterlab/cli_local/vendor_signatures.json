@@ -1,0 +1,177 @@
+{
+ "akamai": {
+  "cookies": [
+   "_abck",
+   "abck",
+   "ak_bmsc",
+   "bm_sz",
+   "bm_sv",
+   "bm_mi"
+  ],
+  "headers": [
+   "server: akamaighost"
+  ],
+  "sensor_urls": [
+   "/akam/"
+  ]
+ },
+ "alibaba_baxia": {
+  "cookies": [],
+  "headers": [],
+  "sensor_urls": [
+   "alicdn.com/sd/punish",
+   "awsc.js"
+  ]
+ },
+ "aws_waf": {
+  "cookies": [
+   "aws-waf-token"
+  ],
+  "headers": [
+   "x-amzn-waf-"
+  ],
+  "sensor_urls": [
+   "awswaf.com"
+  ]
+ },
+ "cloudflare": {
+  "cookies": [
+   "__cf_bm",
+   "cf_clearance",
+   "_cf_chl"
+  ],
+  "headers": [
+   "cf-ray",
+   "cf-cache-status"
+  ],
+  "sensor_urls": [
+   "challenges.cloudflare.com/turnstile",
+   "turnstile.cloudflare.com",
+   "/cdn-cgi/challenge-platform/"
+  ]
+ },
+ "datadome": {
+  "cookies": [
+   "datadome"
+  ],
+  "headers": [
+   "x-datadome-cid",
+   "x-datadome",
+   "x-dd-b"
+  ],
+  "sensor_urls": [
+   "api-js.datadome.co",
+   "js.datadome.co",
+   "captcha-delivery.com",
+   "geo.captcha-delivery",
+   "ct.captcha-delivery",
+   "datadome.co/captcha",
+   "device-verify.datadome.co"
+  ]
+ },
+ "fastly": {
+  "cookies": [],
+  "headers": [
+   "server: varnish",
+   "x-served-by",
+   "x-cache: hit",
+   "x-cache: miss"
+  ],
+  "sensor_urls": []
+ },
+ "generic_captcha": {
+  "cookies": [],
+  "headers": [],
+  "sensor_urls": [
+   "google.com/recaptcha",
+   "recaptcha/api",
+   "recaptcha/enterprise",
+   "hcaptcha.com",
+   "arkoselabs.com",
+   "enforcement.arkoselabs.com",
+   "client-api.arkoselabs.com",
+   "geetest.com"
+  ]
+ },
+ "imperva": {
+  "cookies": [
+   "reese84",
+   "___utmvc",
+   "utmvc",
+   "_incap_",
+   "visid_incap",
+   "nlbi_"
+  ],
+  "headers": [
+   "x-distil-cs",
+   "x-cdn"
+  ],
+  "sensor_urls": []
+ },
+ "kasada": {
+  "cookies": [],
+  "headers": [
+   "x-kpsdk",
+   "x-kp"
+  ],
+  "sensor_urls": [
+   "cd.kasada.io",
+   "/ips.js"
+  ]
+ },
+ "perimeterx": {
+  "cookies": [
+   "_px"
+  ],
+  "headers": [
+   "x-px-",
+   "x-human-"
+  ],
+  "sensor_urls": [
+   "px.human.com/px/client",
+   "human.com/px",
+   "pxcel.net",
+   "client.perimeterx.net",
+   "captcha.px-cdn.net",
+   "enforcer.human.security",
+   "px.human.security",
+   "client.px-cdn.net"
+  ]
+ },
+ "radware": {
+  "cookies": [
+   "__uzm"
+  ],
+  "headers": [],
+  "sensor_urls": [
+   "validate.perfdrive.com"
+  ]
+ },
+ "shape": {
+  "cookies": [
+   "_imp_",
+   "__imp_"
+  ],
+  "headers": [],
+  "sensor_urls": []
+ },
+ "warden": {
+  "cookies": [],
+  "headers": [],
+  "sensor_urls": [
+   "/wardenAsset/"
+  ]
+ },
+ "wordfence": {
+  "cookies": [],
+  "headers": [
+   "x-wf-",
+   "x-wordfence-"
+  ],
+  "sensor_urls": [
+   "wordfence.com/wf-failed-logins",
+   "wordfence.com/learn-more",
+   "wordfence.com/wp-sitemap"
+  ]
+ }
+}

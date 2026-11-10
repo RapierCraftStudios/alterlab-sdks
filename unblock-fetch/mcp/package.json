@@ -1,0 +1,41 @@
+{
+  "name": "unblock-fetch-mcp",
+  "version": "0.1.1",
+  "description": "MCP server exposing a fetch tool that falls back to AlterLab only when blocked",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "fetch",
+    "ai-agents",
+    "claude",
+    "cursor",
+    "alterlab"
+  ],
+  "homepage": "https://github.com/RapierCraftStudios/alterlab-sdks/tree/main/unblock-fetch/mcp#readme",
+  "bugs": {
+    "url": "https://github.com/RapierCraftStudios/alterlab-sdks/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/RapierCraftStudios/alterlab-sdks.git",
+    "directory": "unblock-fetch/mcp"
+  },
+  "license": "MIT",
+  "author": "AlterLab (https://alterlab.io)",
+  "main": "server.js",
+  "bin": {
+    "unblock-fetch-mcp": "server.js"
+  },
+  "files": [
+    "server.js"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node --test tests/server.test.js"
+  },
+  "dependencies": {
+    "unblock-fetch": "^0.1.0"
+  }
+}

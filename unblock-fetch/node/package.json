@@ -1,0 +1,44 @@
+{
+  "name": "unblock-fetch",
+  "version": "0.1.0",
+  "description": "Drop-in fetch that falls back to AlterLab only when the direct fetch is blocked",
+  "keywords": [
+    "fetch",
+    "http",
+    "blocked",
+    "fallback",
+    "alterlab",
+    "web-scraping",
+    "drop-in"
+  ],
+  "homepage": "https://github.com/RapierCraftStudios/alterlab-sdks/tree/main/unblock-fetch/node#readme",
+  "bugs": {
+    "url": "https://github.com/RapierCraftStudios/alterlab-sdks/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/RapierCraftStudios/alterlab-sdks.git",
+    "directory": "unblock-fetch/node"
+  },
+  "license": "MIT",
+  "author": "AlterLab (https://alterlab.io)",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "jest"
+  },
+  "devDependencies": {
+    "@types/jest": "^29.5.12",
+    "@types/node": "^20.10.4",
+    "jest": "^29.7.0",
+    "ts-jest": "^29.1.2",
+    "typescript": "^5.3.2"
+  }
+}

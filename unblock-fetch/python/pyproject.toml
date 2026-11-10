@@ -1,0 +1,26 @@
+[project]
+name = "unblock-fetch"
+version = "0.1.0"
+description = "Drop-in requests/httpx-style fetch that falls back to AlterLab only when the direct fetch is blocked"
+readme = "README.md"
+license = { text = "MIT" }
+keywords = ["requests", "httpx", "fetch", "blocked", "fallback", "alterlab", "web-scraping"]
+authors = [{ name = "AlterLab", email = "dev@alterlab.io" }]
+requires-python = ">=3.9"
+dependencies = ["httpx>=0.25.2,<1.0"]
+
+[project.urls]
+Homepage = "https://alterlab.io"
+Repository = "https://github.com/RapierCraftStudios/alterlab-sdks"
+Source = "https://github.com/RapierCraftStudios/alterlab-sdks/tree/main/unblock-fetch/python"
+"Bug Tracker" = "https://github.com/RapierCraftStudios/alterlab-sdks/issues"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["unblock_fetch"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
