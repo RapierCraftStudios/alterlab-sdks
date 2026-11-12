@@ -86,6 +86,38 @@ class AccountNamespace(_Namespace):
         """Usage statistics (``GET /api/v1/usage``)."""
         return await self._call("GET", "/api/v1/usage")
 
+    async def usage_by_tag(
+        self, tag: Optional[str] = None, since: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Spend and request counts per request tag.
+
+        Without ``tag``: every tag with spend, counts and cap (``GET /api/v1/usage/tags``).
+        With ``tag``: usage filtered to that tag (``GET /api/v1/usage?tag=``). Failed and
+        refunded requests are excluded from spend. ``since`` is an ISO 8601 lower bound.
+        """
+        params: Dict[str, Any] = {}
+        if tag is not None:
+            params["tag"] = tag
+        if since is not None:
+            params["since"] = since
+        path = "/api/v1/usage" if tag is not None else "/api/v1/usage/tags"
+        return await self._call("GET", path, params=params)
+
+    async def set_tag_budget(
+        self, tag: str, max_spend_usd: float, expires_at: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Cap a tag's spend (``PUT /api/v1/usage/tags/{tag}``).
+
+        New work for the tag is rejected with 402 ``tag_budget_exhausted`` once billed spend
+        plus in-flight reservations reach the cap; in-flight work is not cancelled.
+        """
+        body: Dict[str, Any] = {"max_spend_usd": max_spend_usd}
+        if expires_at is not None:
+            body["expires_at"] = expires_at
+        return await self._call(
+            "PUT", f"/api/v1/usage/tags/{quote(tag, safe='')}", body=body
+        )
+
 
 class SupportNamespace(_Namespace):
     """``client.support`` — file a support ticket (``POST /api/v1/agent/support-ticket``)."""

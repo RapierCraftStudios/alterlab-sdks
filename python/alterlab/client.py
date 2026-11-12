@@ -156,6 +156,7 @@ OutputFormat = Literal[
     "content",
     "raw",
     "document",
+    "structured_data",
 ]
 """Output formats accepted by the ``formats`` option (mirrors the API schema)."""
 # END GENERATED: output-formats
@@ -182,6 +183,8 @@ class BillingDetails(Dict[str, Any]):
 
     Fields:
         total_credits: Total credits charged for the request (microcents).
+        cost_usd: Same cost as an exact USD decimal string (1 credit = 1 microcent =
+            $0.000001), present on credit-bearing responses.
         estimated_credits: Pre-flight likely cost (see ``estimate_cost``) to compare with
             ``total_credits``.
         tier_used: Scraping tier that produced the final result (e.g. "1", "4").
@@ -626,10 +629,29 @@ class CostControls:
         return result
 
 
-class AlterLabError(Exception):
-    """Base exception for AlterLab SDK errors."""
+def _org_header_kwargs(organization_id: Optional[str]) -> Dict[str, Any]:
+    """Request kwargs carrying ``X-Organization-Id`` only when one is given."""
+    if organization_id is None:
+        return {}
+    return {"headers": {"X-Organization-Id": organization_id}}
 
-    pass
+
+class AlterLabError(Exception):
+    """Base exception for AlterLab SDK errors.
+
+    Every SDK error carries the typed fields of the API error contract (#40335):
+    ``code``, ``retryable``, ``retry_after_seconds``, ``next_action``, ``charged``,
+    ``auto_retry`` and ``request_id``. SDK-side errors keep these defaults; errors built from an
+    HTTP response fill them from the body and headers.
+    """
+
+    code: str = "sdk_error"
+    retryable: bool = False
+    retry_after_seconds: Optional[float] = None
+    next_action: Optional[Dict[str, Any]] = None
+    charged: Optional[bool] = None
+    auto_retry: Optional[str] = None
+    request_id: Optional[str] = None
 
 
 class ForcedRenderHint(TypedDict):
@@ -689,6 +711,7 @@ class AlterLabAPIError(AlterLabError):
     """
 
     hint: Optional[ForcedRenderHint] = None
+    code: str = "api_error"
 
     def __init__(
         self, status_code: int, detail: str, response: Optional[httpx.Response] = None
@@ -704,7 +727,26 @@ class AlterLabAPIError(AlterLabError):
         self.detail = detail
         self.response = response
         self.hint = _hint_from_response(response)
-        super().__init__(f"API Error {status_code}: {detail}")
+        from ._transport import describe_detail, typed_fields
+
+        for key, value in typed_fields(status_code, response).items():
+            setattr(self, key, value)
+        super().__init__(f"API Error {status_code}: {describe_detail(detail)}")
+
+
+def error_for_response(
+    status_code: int, detail: Any, response: Optional[httpx.Response] = None
+) -> AlterLabAPIError:
+    """Typed error for a failed HTTP response (generated classes, #40335)."""
+    from ._transport import error_for_response as build
+
+    return build(status_code, detail, response)
+
+
+def _network_error(message: str) -> AlterLabError:
+    from ._transport import ConnectionFailedError
+
+    return ConnectionFailedError(message)
 
 
 class AlterLabTimeoutError(AlterLabError):
@@ -769,7 +811,7 @@ class JobExpiredError(AlterLabAPIError):
             ...
     """
 
-    pass
+    code = "job_expired"
 
 
 class AlterLabValidationError(AlterLabError):
@@ -881,7 +923,9 @@ class RateLimitError(AlterLabAPIError):
     .. note::
 
         The SDK automatically retries 429 responses with jittered
-        exponential backoff that honours ``Retry-After``.
+        exponential backoff that honours ``Retry-After``. A terminal 429
+        (``spend_limit_exceeded`` / ``detail.retryable == false``) is raised
+        immediately: retrying cannot succeed before ``retry_at``.
 
     Example::
 
@@ -905,6 +949,13 @@ class RateLimitError(AlterLabAPIError):
     consecutive_failures: Optional[int] = None
     outcome_class: Optional[str] = None
     failure_code: Optional[str] = None
+    retryable: Optional[bool] = None
+    retry_at: Optional[str] = None
+
+    @property
+    def terminal(self) -> bool:
+        """True when retrying cannot succeed until ``retry_at`` (e.g. ``spend_limit_exceeded``)."""
+        return self.error_code == "spend_limit_exceeded" or self.retryable is False
 
     def __init__(
         self,
@@ -946,6 +997,10 @@ class RateLimitError(AlterLabAPIError):
                 self.limit = body_detail["limit"]
             if isinstance(body_detail.get("account_tier"), str):
                 self.account_tier = body_detail["account_tier"]
+            if isinstance(body_detail.get("retryable"), bool):
+                self.retryable = body_detail["retryable"]
+            if isinstance(body_detail.get("retry_at"), str):
+                self.retry_at = body_detail["retry_at"]
             body_retry = body_detail.get("retry_after_seconds")
             if self.retry_after is None and isinstance(body_retry, (int, float)):
                 self.retry_after = float(body_retry)
@@ -975,6 +1030,8 @@ class JobFailedError(AlterLabAPIError):
     failed job, and callers written against that contract must not start
     silently missing this case.
     """
+
+    code = "job_failed"
 
     def __init__(self, job_id: str, status: str, detail: str):
         self.job_id = job_id
@@ -1197,7 +1254,7 @@ class AlterLab(ResearchMixin, ParityMixin):
                             raise InsufficientFundsError(
                                 response.status_code, detail, response
                             )
-                        raise AlterLabAPIError(response.status_code, detail, response)
+                        raise error_for_response(response.status_code, detail, response)
 
                     # Retry server errors (5xx) and rate limits (429)
                     remaining_attempts = self.max_retries - attempt - 1
@@ -1213,8 +1270,10 @@ class AlterLab(ResearchMixin, ParityMixin):
                             retry_after=retry_after,
                         )
                         retry_after = last_error.retry_after
+                        if last_error.terminal:
+                            break
                     else:
-                        last_error = AlterLabAPIError(
+                        last_error = error_for_response(
                             response.status_code, detail, response
                         )
 
@@ -1258,7 +1317,7 @@ class AlterLab(ResearchMixin, ParityMixin):
                 return response
 
             except (httpx.TimeoutException, httpx.NetworkError) as e:
-                last_error = AlterLabError(f"Network error: {str(e)}")
+                last_error = _network_error(f"Network error: {str(e)}")
                 remaining_attempts = self.max_retries - attempt - 1
 
                 sleep_time = _compute_retry_sleep(attempt, self.retry_delay, None)
@@ -1376,6 +1435,7 @@ class AlterLab(ResearchMixin, ParityMixin):
         sync_policy: Literal["auto", "wait_until_deadline"] = "auto",
         response: Optional[Literal["full", "minimal"]] = None,
         extraction_selectors: Optional[Dict[str, Dict[str, Any]]] = None,
+        tag: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Scrape a URL using the unified AlterLab API endpoint.
 
@@ -1564,6 +1624,8 @@ class AlterLab(ResearchMixin, ParityMixin):
             poll_timeout: Maximum time to wait for async jobs (seconds)
             poll_backoff_multiplier: Multiplier for exponential backoff (default: 1.5)
             poll_max_interval: Maximum polling interval (seconds)
+            tag: Optional spend-attribution tag (``^[a-z0-9][a-z0-9_.-]{0,63}$``); stored on
+                usage rows and echoed in the response.
 
         Returns:
             Scrape response dictionary with content, metadata, and billing details.
@@ -1599,7 +1661,8 @@ class AlterLab(ResearchMixin, ParityMixin):
 
                   {"1": 403, "3": 403, "4": 200}
 
-            - ``credits_used``, ``response_time_ms``, ``size_bytes``
+            - ``credits_used`` (microcents) and ``cost_usd`` (exact USD string),
+              ``response_time_ms``, ``size_bytes``
             - ``billing`` (:class:`BillingDetails`): Full billing breakdown including
               ``total_credits``, ``tier_used``, ``escalations``
               (``List[TierEscalationDetail]`` — each entry has ``tier``, ``result``,
@@ -1891,6 +1954,9 @@ class AlterLab(ResearchMixin, ParityMixin):
             agent_headers["X-Agent-Context"] = _ascii_safe_header_value(agent_context)
         if agent_feedback is not None:
             agent_headers["X-Agent-Feedback"] = _ascii_safe_header_value(agent_feedback)
+
+        if tag is not None:
+            payload["tag"] = tag
 
         # Make request
         response = await self._request_with_retry(
@@ -2204,7 +2270,9 @@ class AlterLab(ResearchMixin, ParityMixin):
         )
         return response.json()
 
-    async def get_usage(self) -> Dict[str, Any]:
+    async def get_usage(
+        self, tag: Optional[str] = None, since: Optional[str] = None
+    ) -> Dict[str, Any]:
         """Get current usage statistics and credit balance.
 
         All monetary values are in **microcents** (1,000,000 microcents = $1.00).
@@ -2220,6 +2288,13 @@ class AlterLab(ResearchMixin, ParityMixin):
             - period_start: Start of the current billing period (ISO 8601)
             - period_end: End of the current billing period (ISO 8601)
 
+            With ``tag`` the response also carries ``tag``, ``tag_spent_microcents``
+            (successful rows only), ``tag_requests``, ``tag_succeeded`` and ``tag_failed``.
+
+        Args:
+            tag: Optional request tag; filters spend to that tag.
+            since: With ``tag``, only count rows created at or after this ISO 8601 time.
+
         Raises:
             AlterLabAPIError: On API errors
 
@@ -2229,12 +2304,26 @@ class AlterLab(ResearchMixin, ParityMixin):
             print(f"Balance: ${balance:.4f}")
             print(f"Account tier: {usage['account_tier']}")
         """
-        response = await self._request_with_retry("GET", "/api/v1/usage")
+        params: Dict[str, Any] = {}
+        if tag is not None:
+            params["tag"] = tag
+        if since is not None:
+            params["since"] = since
+        if params:
+            response = await self._request_with_retry("GET", "/api/v1/usage", params=params)
+        else:
+            response = await self._request_with_retry("GET", "/api/v1/usage")
 
         return response.json()
 
     async def batch_scrape(
-        self, requests: List[Dict[str, Any]], webhook_url: Optional[str] = None
+        self,
+        requests: List[Dict[str, Any]],
+        webhook_url: Optional[str] = None,
+        max_in_flight_per_domain: Optional[int] = None,
+        dry_run: bool = False,
+        tag: Optional[str] = None,
+        approval_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Submit multiple scrape requests as a batch.
 
@@ -2246,12 +2335,33 @@ class AlterLab(ResearchMixin, ParityMixin):
                      the same parameters as scrape() method (url, mode, advanced, etc.),
                      including ``extraction_selectors``
             webhook_url: Optional webhook URL for completion notification
+            max_in_flight_per_domain: Optional cap (>= 1) on this batch's concurrent
+                     jobs per registrable domain. It can only lower the adaptive
+                     dispatch window, never raise it. The live per-domain window is
+                     reported as ``dispatch_windows`` in the batch status response.
+            dry_run: When True, return a free cost estimate without dispatching,
+                debiting or reserving anything. The response is a dry-run estimate
+                with keys ``dry_run``, ``status``, ``item_count``, ``items``,
+                ``total_microcents``, ``total_usd``, ``estimated_range_microcents``,
+                ``estimated_range_usd``, ``predicted_seconds``, ``budget``
+                (including ``would_exceed``) and ``notes``.
+            tag: Optional spend-attribution tag (``^[a-z0-9][a-z0-9_.-]{0,63}$``); stored on
+                usage rows and echoed in the response.
+            approval_id: Approval for work above the key's ``approval_above_usd``
+                threshold. The first submit returns a 202 ``pending_approval`` response
+                carrying ``approval_id``; once the account owner approves it, resubmit
+                the identical request with that ``approval_id``.
 
         Returns:
             Batch job information with keys:
             - batch_id: Unique batch identifier
             - total_urls: Number of URLs submitted in the batch
-            - job_ids: Job IDs for the accepted URLs
+            - jobs: One entry per submitted URL, in submission order:
+              ``{index, url, status, job_id, rejected}`` where ``status`` is
+              ``accepted`` or ``rejected`` and ``rejected`` holds ``scope``,
+              ``reason`` and ``retry_after_seconds``
+            - job_ids: Job IDs for the accepted subset, not positional; pair
+              ids with URLs through ``jobs``
             - status: Batch status (e.g. processing)
             - estimated_credits: Credits pre-debited for the accepted URLs
             - accepted_urls: Count of URLs admitted and dispatched as jobs
@@ -2273,9 +2383,10 @@ class AlterLab(ResearchMixin, ParityMixin):
             print(f"Batch ID: {batch['batch_id']}")
 
             # Check individual job statuses
-            for job_id in batch['job_ids']:
-                status = await client.get_job_status(job_id)
-                print(f"Job {job_id}: {status['status']}")
+            for job in batch['jobs']:
+                if job['status'] == 'accepted':
+                    status = await client.get_job_status(job['job_id'])
+                    print(f"{job['url']}: {status['status']}")
         """
         # The API BatchRequest field is ``urls``; the parameter name stays ``requests``
         # for backward compatibility (#35843).
@@ -2283,10 +2394,46 @@ class AlterLab(ResearchMixin, ParityMixin):
 
         if webhook_url:
             payload["webhook_url"] = webhook_url
+        if max_in_flight_per_domain is not None:
+            payload["max_in_flight_per_domain"] = max_in_flight_per_domain
+        if dry_run:
+            payload["dry_run"] = True
+        if approval_id is not None:
+            payload["approval_id"] = approval_id
+
+        if tag is not None:
+            payload["tag"] = tag
+        if approval_id is not None:
+            payload["approval_id"] = approval_id
 
         response = await self._request_with_retry("POST", "/api/v1/batch", json=payload)
 
         return response.json()
+
+    async def resubmit_rejected(
+        self,
+        requests: List[Dict[str, Any]],
+        batch_response: Dict[str, Any],
+        webhook_url: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Resubmit the items a batch rejected.
+
+        Args:
+            requests: The list you passed to ``batch_scrape()``.
+            batch_response: The response ``batch_scrape()`` returned.
+            webhook_url: Optional webhook URL for the new batch.
+
+        Returns:
+            The new batch response, or ``None`` when nothing was rejected.
+        """
+        retry = [
+            requests[job["index"]]
+            for job in batch_response.get("jobs") or []
+            if job.get("status") == "rejected" and 0 <= job["index"] < len(requests)
+        ]
+        if not retry:
+            return None
+        return await self.batch_scrape(retry, webhook_url=webhook_url)
 
     # Convenience methods with preset configurations
 
@@ -2432,6 +2579,10 @@ class AlterLab(ResearchMixin, ParityMixin):
         respect_robots: bool = True,
         include_subdomains: bool = False,
         cost_controls: Optional[Dict[str, Any]] = None,
+        list: Optional[Dict[str, Any]] = None,
+        dry_run: bool = False,
+        tag: Optional[str] = None,
+        approval_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Start a website crawl.
 
@@ -2454,6 +2605,23 @@ class AlterLab(ResearchMixin, ParityMixin):
             include_subdomains: Include links to subdomains (default False)
             cost_controls: Cost controls dict with max_credits, max_tier, force_tier,
                 time_budget
+            list: Paginated list crawl: ``{"url_template": "https://x.com/p?page={page}",
+                "start": 1, "max_pages": 50, "item_key": "url" | "jsonld:@id" |
+                "selector:<css>", "stop_when": {"no_new_items": 2}}``. Skips link
+                following; billed per page fetched. get_crawl() returns ``items`` and
+                ``stopped_reason``.
+            dry_run: When True, return a free cost estimate without dispatching,
+                debiting or reserving anything. The response is a dry-run estimate
+                with keys ``dry_run``, ``status``, ``item_count``, ``items``,
+                ``total_microcents``, ``total_usd``, ``estimated_range_microcents``,
+                ``estimated_range_usd``, ``predicted_seconds``, ``budget``
+                (including ``would_exceed``) and ``notes``.
+            tag: Optional spend-attribution tag (``^[a-z0-9][a-z0-9_.-]{0,63}$``); stored on
+                usage rows and echoed in the response.
+            approval_id: Approval for work above the key's ``approval_above_usd``
+                threshold. The first submit returns a 202 ``pending_approval`` response
+                carrying ``approval_id``; once the account owner approves it, resubmit
+                the identical request with that ``approval_id``.
 
         Returns:
             Crawl response with crawl_id, status, estimated_pages, etc.
@@ -2498,6 +2666,17 @@ class AlterLab(ResearchMixin, ParityMixin):
             payload["advanced"] = advanced
         if cost_controls is not None:
             payload["cost_controls"] = cost_controls
+        if list is not None:
+            payload["list"] = list
+        if dry_run:
+            payload["dry_run"] = True
+        if approval_id is not None:
+            payload["approval_id"] = approval_id
+
+        if tag is not None:
+            payload["tag"] = tag
+        if approval_id is not None:
+            payload["approval_id"] = approval_id
 
         response = await self._request_with_retry("POST", "/api/v1/crawl", json=payload)
 
@@ -2663,10 +2842,11 @@ class AlterLab(ResearchMixin, ParityMixin):
             async with stream_client.stream("GET", url, headers=headers) as response:
                 if response.status_code != 200:
                     body = await response.aread()
-                    raise AlterLabAPIError(
-                        f"SSE stream failed: {response.status_code}",
-                        status_code=response.status_code,
-                        response_body=body.decode("utf-8", errors="replace"),
+                    raise error_for_response(
+                        response.status_code,
+                        f"SSE stream failed: {response.status_code}: "
+                        + body.decode("utf-8", errors="replace"),
+                        response,
                     )
 
                 current_event = "message"
@@ -2729,6 +2909,7 @@ class AlterLab(ResearchMixin, ParityMixin):
         respect_robots: bool = True,
         include_subdomains: bool = False,
         cost_controls: Optional[Dict[str, Any]] = None,
+        tag: Optional[str] = None,
         poll_interval: float = 2.0,
         poll_timeout: float = 600.0,
         poll_backoff_multiplier: float = 1.5,
@@ -2754,6 +2935,8 @@ class AlterLab(ResearchMixin, ParityMixin):
             respect_robots: Respect robots.txt (default True)
             include_subdomains: Include subdomains (default False)
             cost_controls: Cost controls dict
+            tag: Optional spend-attribution tag (``^[a-z0-9][a-z0-9_.-]{0,63}$``); stored on
+                usage rows and echoed in the response.
             poll_interval: Initial polling interval in seconds (default 2.0)
             poll_timeout: Maximum wait time in seconds (default 600.0)
             poll_backoff_multiplier: Backoff multiplier (default 1.5)
@@ -2789,6 +2972,7 @@ class AlterLab(ResearchMixin, ParityMixin):
             respect_robots=respect_robots,
             include_subdomains=include_subdomains,
             cost_controls=cost_controls,
+            tag=tag,
         )
 
         crawl_id = crawl_response["crawl_id"]
@@ -2842,6 +3026,7 @@ class AlterLab(ResearchMixin, ParityMixin):
         live: Optional[bool] = None,
         concise: bool = True,
         sync: bool = False,
+        tag: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Search the web: unified, vendor-neutral results with page content by default.
 
@@ -2885,6 +3070,8 @@ class AlterLab(ResearchMixin, ParityMixin):
             sync: With ``scrape_results=True``, wait up to a bounded budget (about 30s)
                 and return content in one call; on timeout the response is a 202 with
                 ``next_action`` (poll ``get_search``)
+            tag: Optional spend-attribution tag (``^[a-z0-9][a-z0-9_.-]{0,63}$``); stored on
+                usage rows and echoed in the response.
 
         Returns:
             Search response with search_id, results, credits_used, etc. Content searches
@@ -2957,6 +3144,9 @@ class AlterLab(ResearchMixin, ParityMixin):
             payload["live"] = live
 
         path = "/api/v1/serp" if use_serp else "/api/v1/search"
+        if tag is not None:
+            payload["tag"] = tag
+
         response = await self._request_with_retry("POST", path, json=payload)
         return response.json()
 
@@ -2973,6 +3163,7 @@ class AlterLab(ResearchMixin, ParityMixin):
         scrape_results: bool = False,
         formats: Optional[List[OutputFormat]] = None,
         webhook_url: Optional[str] = None,
+        tag: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Submit a batch of search queries for async parallel processing.
 
@@ -2988,6 +3179,8 @@ class AlterLab(ResearchMixin, ParityMixin):
             formats: Output formats when scrape_results=True (includes "rag")
             webhook_url: URL to receive batch.search.completed webhook (counts and
                 status only; poll get_batch_search() for results)
+            tag: Optional spend-attribution tag (``^[a-z0-9][a-z0-9_.-]{0,63}$``); stored on
+                usage rows and echoed in the response.
 
         Returns:
             Batch response with batch_id, job_ids, status, etc.
@@ -3015,6 +3208,9 @@ class AlterLab(ResearchMixin, ParityMixin):
         if webhook_url is not None:
             payload["webhook_url"] = webhook_url
 
+        if tag is not None:
+            payload["tag"] = tag
+
         response = await self._request_with_retry(
             "POST", "/api/v1/search/batch", json=payload
         )
@@ -3032,6 +3228,73 @@ class AlterLab(ResearchMixin, ParityMixin):
         """
         response = await self._request_with_retry(
             "GET", f"/api/v1/search/batch/{batch_id}"
+        )
+        return response.json()
+
+    async def get_batch_status(self, batch_id: str) -> Dict[str, Any]:
+        """Poll a batch (GET /api/v1/batch/{batch_id}).
+
+        ``paused`` counts items held back by the ``paused_low_success`` stop and
+        ``paused_reason`` carries the machine-readable cause.
+        """
+        response = await self._request_with_retry("GET", f"/api/v1/batch/{batch_id}")
+        return response.json()
+
+    async def resume_batch(self, batch_id: str) -> Dict[str, Any]:
+        """Re-enqueue items paused with ``paused_low_success``
+        (POST /api/v1/batch/{batch_id}/resume).
+
+        Returns ``batch_id``, ``resumed`` (items re-enqueued) and ``status``.
+        """
+        response = await self._request_with_retry(
+            "POST", f"/api/v1/batch/{batch_id}/resume"
+        )
+        return response.json()
+
+    async def get_approval(self, approval_id: str) -> Dict[str, Any]:
+        """Poll a spend approval (GET /api/v1/approvals/{approval_id}).
+
+        Batch or crawl work estimated above the key's ``approval_above_usd``
+        threshold is accepted as ``status: "pending_approval"`` with an
+        ``approval_id``, ``approval_url`` and ``next_action``. Show the URL to the
+        account owner, poll here until ``status`` is ``approved`` (others:
+        ``pending``, ``denied``, ``consumed``), then resubmit the identical request
+        with ``approval_id=...``. An API key cannot approve its own spend.
+        """
+        response = await self._request_with_retry(
+            "GET", f"/api/v1/approvals/{quote(approval_id, safe='')}"
+        )
+        return response.json()
+
+    async def get_tag_approval(
+        self, tag: str, organization_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Read a request tag's ``approval_above_usd`` threshold.
+
+        ``organization_id`` optionally sends the ``X-Organization-Id`` header.
+        """
+        response = await self._request_with_retry(
+            "GET",
+            f"/api/v1/usage-tags/{quote(tag, safe='')}/approval",
+            **_org_header_kwargs(organization_id),
+        )
+        return response.json()
+
+    async def set_tag_approval(
+        self,
+        tag: str,
+        approval_above_usd: Optional[float],
+        organization_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Set (or clear with ``None``) a request tag's ``approval_above_usd``.
+
+        ``organization_id`` optionally sends the ``X-Organization-Id`` header.
+        """
+        response = await self._request_with_retry(
+            "PUT",
+            f"/api/v1/usage-tags/{quote(tag, safe='')}/approval",
+            json={"approval_above_usd": approval_above_usd},
+            **_org_header_kwargs(organization_id),
         )
         return response.json()
 
@@ -3053,6 +3316,7 @@ class AlterLab(ResearchMixin, ParityMixin):
         include_metadata: bool = False,
         include_subdomains: bool = False,
         respect_robots: bool = True,
+        tag: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Discover URLs on a website via sitemap parsing and link extraction.
 
@@ -3071,6 +3335,8 @@ class AlterLab(ResearchMixin, ParityMixin):
             include_metadata: Fetch title and meta description for each URL
             include_subdomains: Include URLs from subdomains
             respect_robots: Respect robots.txt directives (default True)
+            tag: Optional spend-attribution tag (``^[a-z0-9][a-z0-9_.-]{0,63}$``); stored on
+                usage rows and echoed in the response.
 
         Returns:
             Map response with map_id, urls, total_urls, credits_used, etc.
@@ -3104,6 +3370,9 @@ class AlterLab(ResearchMixin, ParityMixin):
             payload["search"] = search
         if sitemap_path is not None:
             payload["sitemap_path"] = sitemap_path
+
+        if tag is not None:
+            payload["tag"] = tag
 
         response = await self._request_with_retry("POST", "/api/v1/map", json=payload)
         return response.json()
@@ -3155,6 +3424,7 @@ class AlterLab(ResearchMixin, ParityMixin):
         cache: Literal["auto", "skip", "only"] = "auto",
         cache_ttl: Optional[int] = None,
         extraction_selectors: Optional[Dict[str, Dict[str, Any]]] = None,
+        tag: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Extract structured data from raw content without scraping.
 
@@ -3188,6 +3458,8 @@ class AlterLab(ResearchMixin, ParityMixin):
                 cached result or HTTP 404 — never calls the LLM.
             cache_ttl: TTL for caching this extraction result, in seconds (1–86400).
                 Defaults to the server-side LLM_EXTRACTION_CACHE_TTL env var (3600s).
+            tag: Optional spend-attribution tag (``^[a-z0-9][a-z0-9_.-]{0,63}$``); stored on
+                usage rows and echoed in the response.
 
         Returns:
             Extract response with extract_id, formats, credits_used, etc.
@@ -3232,6 +3504,9 @@ class AlterLab(ResearchMixin, ParityMixin):
             payload["source_url"] = source_url
         if cache_ttl is not None:
             payload["cache_ttl"] = cache_ttl
+
+        if tag is not None:
+            payload["tag"] = tag
 
         response = await self._request_with_retry(
             "POST", "/api/v1/extract", json=payload
@@ -3583,9 +3858,9 @@ class AlterLabSync:
         """Synchronous version of hands_request()."""
         return self._run(self._client.hands_request(method, path, body))
 
-    def get_usage(self) -> Dict[str, Any]:
+    def get_usage(self, *args, **kwargs) -> Dict[str, Any]:
         """Synchronous version of get_usage()."""
-        return self._run(self._client.get_usage())
+        return self._run(self._client.get_usage(*args, **kwargs))
 
     def get_artifact(self, artifact_id: str) -> Dict[str, Any]:
         """Synchronous version of get_artifact()."""
@@ -3610,6 +3885,10 @@ class AlterLabSync:
     def batch_scrape(self, *args, **kwargs) -> Dict[str, Any]:
         """Synchronous version of batch_scrape()."""
         return self._run(self._client.batch_scrape(*args, **kwargs))
+
+    def resubmit_rejected(self, *args, **kwargs) -> Optional[Dict[str, Any]]:
+        """Synchronous version of resubmit_rejected()."""
+        return self._run(self._client.resubmit_rejected(*args, **kwargs))
 
     def crawl(self, *args, **kwargs) -> Dict[str, Any]:
         """Synchronous version of crawl()."""
@@ -3682,6 +3961,26 @@ class AlterLabSync:
     def get_batch_search(self, *args, **kwargs) -> Dict[str, Any]:
         """Synchronous version of get_batch_search()."""
         return self._run(self._client.get_batch_search(*args, **kwargs))
+
+    def get_batch_status(self, *args, **kwargs) -> Dict[str, Any]:
+        """Synchronous version of get_batch_status()."""
+        return self._run(self._client.get_batch_status(*args, **kwargs))
+
+    def resume_batch(self, *args, **kwargs) -> Dict[str, Any]:
+        """Synchronous version of resume_batch()."""
+        return self._run(self._client.resume_batch(*args, **kwargs))
+
+    def get_approval(self, *args, **kwargs) -> Dict[str, Any]:
+        """Synchronous version of get_approval()."""
+        return self._run(self._client.get_approval(*args, **kwargs))
+
+    def get_tag_approval(self, *args, **kwargs) -> Dict[str, Any]:
+        """Synchronous version of get_tag_approval()."""
+        return self._run(self._client.get_tag_approval(*args, **kwargs))
+
+    def set_tag_approval(self, *args, **kwargs) -> Dict[str, Any]:
+        """Synchronous version of set_tag_approval()."""
+        return self._run(self._client.set_tag_approval(*args, **kwargs))
 
     def map(self, *args, **kwargs) -> Dict[str, Any]:
         """Synchronous version of map()."""

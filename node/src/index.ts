@@ -32,6 +32,52 @@ import type { ArtifactUrl } from "./artifacts";
 import { detailHintSource, parseFailureBackoffDetail } from "./failure-backoff";
 
 export type { FailureBackoffOutcomeClass } from "./failure-backoff";
+import {
+  applyTypedFields,
+  toTypedError,
+  type BatchStatusResponse,
+} from "./transport.generated";
+export * as transport from "./transport.generated";
+export {
+  AlterLabError,
+  ERROR_CODES,
+  ERROR_CLASSES,
+  describeErrorDetail,
+  toTypedError,
+  type ErrorCode,
+  type TypedErrorFields,
+} from "./transport.generated";
+export {
+  BadGatewayError,
+  BadRequestError,
+  BlockedUpstreamError,
+  ClientError,
+  ConflictError,
+  CrawlConcurrencyLimitReachedError,
+  ForbiddenError,
+  GatewayTimeoutError,
+  InternalError,
+  InvalidInputError,
+  InvalidVersionError,
+  ListingDegradedError,
+  ListingNotFoundError,
+  ListingRunNotFoundError,
+  ListingRunUnavailableError,
+  MethodNotAllowedError,
+  NetworkError,
+  NotFoundError,
+  PayloadTooLargeError,
+  RepeatFailureBackoffError,
+  RequestCancelledError,
+  RequestTimeoutError,
+  ServerError,
+  ServiceUnavailableError,
+  SessionRequiredError,
+  SpendCapExceededError,
+  SpendLimitExceededError,
+  UnauthorizedError,
+  ValidationError,
+} from "./transport.generated";
 export * from "./research";
 import {
   RESEARCH_SETTLED_STATUSES,
@@ -41,6 +87,63 @@ import {
   type ResearchRequest,
   type WaitForResearchOptions,
 } from "./research";
+
+/** Response from `POST /v1/batch/{batch_id}/resume`. */
+export interface BatchResumeResponse {
+  batch_id: string;
+  /** Items re-enqueued after the `paused_low_success` stop. */
+  resumed: number;
+  status: string;
+}
+
+/** Next step an agent shows its human when work is held for approval. */
+export interface PendingApprovalNextAction {
+  type: string;
+  approval_url: string;
+  poll_after_seconds?: number;
+  [key: string]: unknown;
+}
+
+/**
+ * Accepted-but-held response (HTTP 202) of a batch or crawl estimated above the
+ * key's or tag's `approval_above_usd`. Nothing was dispatched or charged. Show
+ * `next_action.approval_url` to the account owner, poll `getApproval()` until
+ * `approved`, then resubmit the identical request with `approval_id`.
+ * `batchScrape()`/`crawl()` keep their declared return types, so cast the result.
+ */
+export interface PendingApproval {
+  status: "pending_approval";
+  approval_id?: string;
+  approval_url?: string;
+  next_action: PendingApprovalNextAction;
+  [key: string]: unknown;
+}
+
+/** Response of `GET /v1/approvals/{approval_id}` and the tag threshold endpoints. */
+export interface ApprovalStatus {
+  approval_id: string;
+  status: "pending" | "approved" | "denied" | "consumed";
+  estimated_microcents?: number;
+  estimated_usd?: number;
+  approval_above_usd?: number | null;
+  approval_url: string;
+  expires_at?: string | null;
+}
+
+/** A request tag's approval threshold (`null` means no threshold). */
+/** Body for the spend-limit endpoints (`SpendLimitConfig`). */
+export interface SpendLimitConfig {
+  enabled?: boolean;
+  request_limit?: number | null;
+  budget_limit_microcents?: number | null;
+  reset_period?: "daily" | "weekly" | "monthly";
+  approval_above_usd?: number | null;
+}
+
+export interface TagApproval {
+  tag: string;
+  approval_above_usd: number | null;
+}
 
 /** SDK version — keep in sync with package.json */
 const SDK_VERSION = "2.5.6";
@@ -181,6 +284,8 @@ export interface TierEscalationDetail {
  * (divide by 1 000 000 to get USD).
  */
 export interface BillingDetails {
+  /** Cost in USD as an exact decimal string (credits fields are microcents: 1 credit = $0.000001). */
+  cost_usd?: string;
   /** Total credits charged for the request (microcents). */
   total_credits: number;
   /** Scraping tier that produced the final result (e.g. `"1"`, `"4"`). */
@@ -325,6 +430,8 @@ export type ExtractionSelectors = Record<string, ExtractionSelector>;
 
 export interface ScrapeRequest {
   url: string;
+  /** Spend-attribution tag (^[a-z0-9][a-z0-9_.-]{0,63}$, max 20 active tags per organization); echoed in the response. */
+  tag?: string | null;
   mode?: "auto" | "html" | "js" | "pdf" | "ocr";
   sync?: boolean;
   /** `auto` preserves early async handoff; `wait_until_deadline` waits for completion up to the safe sync deadline. */
@@ -709,7 +816,19 @@ export interface SyncDowngradedResponse extends ScrapeAcceptedResponse {
   credits_status?: string;
 }
 
+/** A pointer to an existing feature that fits the scraped page (#40356). */
+export interface DiscoveryHint {
+  /** Output format to request, e.g. `json_v2`. */
+  format: string;
+  /** Why this format fits the page that was just scraped. */
+  why: string;
+}
+
 export interface ScrapeResponse {
+  /** Request tag echoed from the submitted request, if any. */
+  tag?: string | null;
+  /** Cost in USD as an exact decimal string (credits fields are microcents: 1 credit = $0.000001). */
+  cost_usd?: string;
   url: string;
   /** Machine-readable warnings, e.g. `requested_option_ignored` or `raw_html_truncated`. */
   warnings?: Array<Record<string, string>> | null;
@@ -897,6 +1016,8 @@ export interface ScrapeResponse {
    * returned and the embeddings add-on is not charged.
    */
   embeddings_error?: EmbeddingsError | null;
+  /** Discovery hints, e.g. `[{ format: "json_v2", why: "..." }]`. Omitted when none. */
+  hints?: DiscoveryHint[] | null;
 }
 
 /** Result of a single browser action execution. */
@@ -1046,6 +1167,14 @@ export interface UsageStats {
   entitlement_source: string;
   period_start: string;
   period_end: string;
+  /** Set when the response is filtered to one request tag. */
+  tag?: string | null;
+  /** Billed spend of the tag in microcents (successful rows only). */
+  tag_spent_microcents?: number | null;
+  /** Rows tracked for the tag. */
+  tag_requests?: number | null;
+  tag_succeeded?: number | null;
+  tag_failed?: number | null;
 }
 
 export interface CrawlAdvancedOptions {
@@ -1065,6 +1194,12 @@ export interface CrawlAdvancedOptions {
 
 export interface CrawlRequest {
   url: string;
+  /** Spend-attribution tag (^[a-z0-9][a-z0-9_.-]{0,63}$, max 20 active tags per organization); echoed in the response. */
+  tag?: string | null;
+  /** Approval id returned with `pending_approval`; resubmit the identical request with it once the spend is approved. */
+  approvalId?: string;
+  /** Return a free cost estimate (see `DryRunEstimate`) without dispatching, debiting or reserving anything. */
+  dryRun?: boolean;
   maxPages?: number;
   maxDepth?: number;
   includePatterns?: string[];
@@ -1158,14 +1293,38 @@ export interface CrawlRequest {
     chunk_size?: number;
     chunk_overlap?: number;
   };
+  /**
+   * Paginated list crawl: fetches `url_template` page by page (no link following) until
+   * `stop_when`, `max_pages`, `max_credits` or an error stops it. Billed per page fetched.
+   */
+  list?: CrawlListConfig;
+}
+
+/** Paginated list crawl configuration (`list` on a crawl request). */
+export interface CrawlListConfig {
+  /** URL containing a `{page}` placeholder. */
+  url_template: string;
+  /** First page number (default 1). */
+  start?: number;
+  /** Hard ceiling on pages fetched (default 50). */
+  max_pages?: number;
+  /** Item identity: `"url"`, `"jsonld:@id"` or `"selector:<css>"` (default `"url"`). */
+  item_key?: string;
+  stop_when?: { no_new_items?: number };
 }
 
 export interface CrawlResponse {
+  /** Request tag echoed from the submitted request, if any. */
+  tag?: string | null;
+  /** Cost in USD as an exact decimal string (credits fields are microcents: 1 credit = $0.000001). */
+  cost_usd?: string;
   crawl_id: string;
   status: string;
   estimated_pages: number;
   total_enqueued: number;
   estimated_credits: number;
+  /** True for list crawls: estimates are a ceiling; only fetched pages are charged. */
+  estimate_is_ceiling?: boolean;
   message: string;
   /**
    * Effective storage backend for this crawl (default `"redis"`). `"redis"` = inline
@@ -1186,6 +1345,8 @@ export interface CrawlResponse {
 
 /** Per-depth-level analytics for a crawl. */
 export interface CrawlDepthStats {
+  /** Cost in USD as an exact decimal string (credits fields are microcents: 1 credit = $0.000001). */
+  cost_usd?: string;
   /** Depth level (0 = start URL). */
   depth: number;
   /** Total pages at this depth. */
@@ -1301,7 +1462,15 @@ export interface GetCrawlOptions {
 }
 
 export interface CrawlStatusResponse {
+  /** Cost in USD as an exact decimal string (credits fields are microcents: 1 credit = $0.000001). */
+  cost_usd?: string;
   crawl_id: string;
+  /** List crawls only: why pagination stopped. */
+  stopped_reason?: "no_new_items" | "max_pages" | "budget" | "error" | null;
+  /** List crawls only: deduplicated items collected so far. */
+  items?: Array<{ key: string; url?: string | null; page: number }> | null;
+  /** List crawls only: page a resume would fetch next. */
+  next_page?: number | null;
   /**
    * Source citation to keep when presenting results. Present for free, trial and keyless
    * usage; omitted for paid accounts unless enabled in settings. Never alters the data.
@@ -1362,6 +1531,8 @@ export interface CrawlStatusResponse {
 }
 
 export interface CrawlCancelResponse {
+  /** Cost in USD as an exact decimal string (credits fields are microcents: 1 credit = $0.000001). */
+  cost_usd?: string;
   crawl_id: string;
   /**
    * `"cancelled"` when fully cancelled and refund applied.
@@ -1497,11 +1668,73 @@ export interface BatchExportConfig {
 }
 
 /** Body of `POST /api/v1/batch` (API `BatchRequest`). */
+/** Per-item entry of a dry-run estimate. */
+export interface DryRunItem {
+  url: string;
+  predicted_tier: string;
+  estimated_microcents: number;
+}
+
+/** Remaining-budget check of a dry-run estimate. */
+export interface DryRunBudget {
+  limit_type: string | null;
+  limit_microcents: number | null;
+  remaining_microcents: number | null;
+  would_exceed: boolean;
+}
+
+/**
+ * 202 response of a batch or crawl estimated above the key's `approval_above_usd`:
+ * nothing was dispatched or charged. Have the account owner open `approval_url`,
+ * poll `GET /api/v1/approvals/{approval_id}` until approved, then resubmit the
+ * identical request with `approval_id` (`approvalId` on `crawl()`).
+ * `batchScrape()`/`crawl()` keep their declared return types, so cast the result.
+ */
+export interface PendingApprovalResponse {
+  status: "pending_approval";
+  approval_id: string;
+  endpoint: string;
+  estimated_microcents: number;
+  estimated_usd: number;
+  approval_above_usd: number;
+  approval_url: string;
+  expires_at: string;
+  next_action: Record<string, unknown>;
+}
+
+/**
+ * Response of a batch or crawl submitted with `dry_run`: nothing was dispatched.
+ * `batchScrape()`/`crawl()` keep their declared return types, so cast the result.
+ */
+export interface DryRunEstimate {
+  dry_run: true;
+  status: "dry_run";
+  item_count: number;
+  items: DryRunItem[];
+  total_microcents: number;
+  total_usd: number;
+  estimated_range_microcents: { low: number; high: number };
+  estimated_range_usd: { low: number; high: number };
+  predicted_seconds: number;
+  budget: DryRunBudget;
+  notes: Record<string, unknown>;
+}
+
 export interface BatchRequest {
   /** URLs to scrape (1-100). */
   urls: BatchScrapeRequest[];
+  /** Spend-attribution tag (^[a-z0-9][a-z0-9_.-]{0,63}$, max 20 active tags per organization); echoed in the response. */
+  tag?: string | null;
   /** BYOS session ID applied to every URL; all URLs must match its domain. */
   session_id?: string;
+  /** Approval id returned with `pending_approval`; resubmit the identical request with it once the spend is approved. */
+  approval_id?: string;
+  /** Return a free cost estimate (see `DryRunEstimate`) without dispatching, debiting or reserving anything. */
+  dry_run?: boolean;
+  /** Cap on concurrent jobs per registrable domain (>= 1); can only lower the adaptive dispatch window. */
+  max_in_flight_per_domain?: number;
+  /** Queue items over your global or per-domain concurrency limit (default true, up to 15 minutes); false rejects them in `rejected_items`. */
+  queue_over_limit?: boolean;
   /** Receives the `batch.completed` event when all jobs finish. */
   webhook_url?: string;
   /** Upload results to cloud storage on batch completion. */
@@ -1571,21 +1804,47 @@ export interface BatchRejectedItem {
   scope: string;
   domain?: string | null;
   limit?: number | null;
+  retry_after_seconds?: number | null;
+}
+
+/** Why one batch item has no job. */
+export interface BatchJobRejection {
+  scope: string;
+  reason: string;
+  retry_after_seconds?: number | null;
+}
+
+/** Outcome for one submitted batch item, in submission order. */
+export interface BatchJobEntry {
+  index: number;
+  url: string;
+  status: "accepted" | "rejected";
+  job_id: string | null;
+  rejected: BatchJobRejection | null;
 }
 
 export interface BatchResponse {
+  /** Request tag echoed from the submitted request, if any. */
+  tag?: string | null;
+  /** Cost in USD as an exact decimal string (credits fields are microcents: 1 credit = $0.000001). */
+  cost_usd?: string;
   batch_id: string;
   total_urls: number;
   /** @deprecated Use total_urls. Retained for clients migrating from <=3.21.3. */
   total_requests?: number;
   estimated_credits: number;
+  /** Accepted subset, not positional. Pair ids with URLs through `jobs`. */
   job_ids: string[];
+  /** One entry per submitted item, in submission order. */
+  jobs: BatchJobEntry[];
   status: string;
   accepted_urls: number;
   rejected_urls: number;
   rejected_items: BatchRejectedItem[];
   byos_applied: boolean;
   byos_session_name?: string | null;
+  /** Documentation for partial batch acceptance. Present only when `rejected_items` is non-empty. */
+  docs_url?: string | null;
 }
 
 // BEGIN GENERATED: output-formats (scripts/generate_output_formats.py; do not edit)
@@ -1599,7 +1858,8 @@ export type OutputFormat =
   | "rag"
   | "content"
   | "raw"
-  | "document";
+  | "document"
+  | "structured_data";
 // END GENERATED: output-formats
 
 /**
@@ -1702,6 +1962,8 @@ export interface CostEstimateRequest {
   max_age?: number;
   /** Token budget (1-200000) for markdown when `agent_profile` is `"agent"`. */
   max_tokens?: number;
+  /** Spend-attribution tag (^[a-z0-9][a-z0-9_.-]{0,63}$, max 20 active tags per organization); echoed in the response. */
+  tag?: string | null;
 }
 
 /** Pre-built extraction profile / template names accepted by the API. */
@@ -1723,6 +1985,8 @@ export interface EstimateDriver {
 }
 
 export interface CostEstimateResponse {
+  /** Cost in USD as an exact decimal string (credits fields are microcents: 1 credit = $0.000001). */
+  cost_usd?: string;
   url: string;
   estimated_tier: string;
   estimated_credits: number;
@@ -1843,6 +2107,8 @@ export interface MultiSearchQueryResult {
 }
 
 export interface MultiSearchResponse {
+  /** Cost in USD as an exact decimal string (credits fields are microcents: 1 credit = $0.000001). */
+  cost_usd?: string;
   schema_version: string;
   search_id: string;
   queries_count: number;
@@ -1855,6 +2121,8 @@ export interface MultiSearchResponse {
 export interface SearchRequest {
   /** Exactly one of `query` or `queries`. */
   query?: string;
+  /** Spend-attribution tag (^[a-z0-9][a-z0-9_.-]{0,63}$, max 20 active tags per organization); echoed in the response. */
+  tag?: string | null;
   /** 1-5 queries run in one request and billed as one unit (returns MultiSearchResponse). */
   queries?: string[];
   engine?: "duckduckgo" | "google" | "bing" | "auto";
@@ -1942,6 +2210,10 @@ export interface SearchResult {
 }
 
 export interface SearchResponse {
+  /** Request tag echoed from the submitted request, if any. */
+  tag?: string | null;
+  /** Cost in USD as an exact decimal string (credits fields are microcents: 1 credit = $0.000001). */
+  cost_usd?: string;
   /** Share of results with full content (`content_status` "ok"), 0-1; `scrape_results` only. */
   content_coverage?: number | null;
   search_id: string;
@@ -2109,6 +2381,8 @@ export interface Coordinates {
 
 export interface BatchSearchRequest {
   queries: string[];
+  /** Spend-attribution tag (^[a-z0-9][a-z0-9_.-]{0,63}$, max 20 active tags per organization); echoed in the response. */
+  tag?: string | null;
   engine?: "duckduckgo" | "google" | "bing";
   num_results?: number;
   country?: string;
@@ -2143,6 +2417,8 @@ export interface BatchSearchRequest {
 }
 
 export interface BatchSearchResponse {
+  /** Cost in USD as an exact decimal string (credits fields are microcents: 1 credit = $0.000001). */
+  cost_usd?: string;
   schema_version: string;
   batch_id: string;
   total_queries: number;
@@ -2155,6 +2431,8 @@ export interface BatchSearchResponse {
 
 /** Response from `GET /v1/search/{search_id}` (search started with `scrape_results`). */
 export interface SearchStatusResponse {
+  /** Cost in USD as an exact decimal string (credits fields are microcents: 1 credit = $0.000001). */
+  cost_usd?: string;
   schema_version: string;
   search_id: string;
   query: string;
@@ -2184,6 +2462,8 @@ export interface SearchStatusResponse {
 
 /** Response from `GET /v1/search/batch/{batch_id}`. */
 export interface BatchSearchStatusResponse {
+  /** Cost in USD as an exact decimal string (credits fields are microcents: 1 credit = $0.000001). */
+  cost_usd?: string;
   schema_version: string;
   batch_id: string;
   /** processing | completed | partial | failed */
@@ -2205,6 +2485,8 @@ export interface BatchSearchStatusResponse {
 
 export interface MapRequest {
   url: string;
+  /** Spend-attribution tag (^[a-z0-9][a-z0-9_.-]{0,63}$, max 20 active tags per organization); echoed in the response. */
+  tag?: string | null;
   max_pages?: number;
   max_depth?: number;
   include_patterns?: string[];
@@ -2227,6 +2509,10 @@ export interface MapURLEntry {
 }
 
 export interface MapResponse {
+  /** Request tag echoed from the submitted request, if any. */
+  tag?: string | null;
+  /** Cost in USD as an exact decimal string (credits fields are microcents: 1 credit = $0.000001). */
+  cost_usd?: string;
   map_id: string;
   total_urls: number;
   urls: MapURLEntry[];
@@ -2241,6 +2527,8 @@ export interface MapResponse {
 
 export interface ExtractRequest {
   content: string;
+  /** Spend-attribution tag (^[a-z0-9][a-z0-9_.-]{0,63}$, max 20 active tags per organization); echoed in the response. */
+  tag?: string | null;
   /** ID of a saved custom extraction template; its schema is used as `extraction_schema`. */
   extraction_template_id?: string | null;
   /** Pin a saved template version (>= 1); defaults to the current version. */
@@ -2334,6 +2622,10 @@ export interface ExtractionMetadata {
 }
 
 export interface ExtractResponse {
+  /** Request tag echoed from the submitted request, if any. */
+  tag?: string | null;
+  /** Cost in USD as an exact decimal string (credits fields are microcents: 1 credit = $0.000001). */
+  cost_usd?: string;
   extract_id: string;
   /**
    * Source citation to keep when presenting results. Present for free, trial and keyless
@@ -2703,6 +2995,12 @@ export const silentLogger: Logger = {
  * ```
  */
 export class JobExpiredError extends Error {
+  /** Stable error code (#40335). */
+  readonly code: string = "job_expired";
+  readonly retryable: boolean = false;
+  readonly retryAfterSeconds: number | null = null;
+  readonly nextAction: Record<string, unknown> | null = null;
+  readonly requestId: string | null = null;
   /** The job ID that was not found (expired). */
   readonly jobId: string;
 
@@ -2729,6 +3027,12 @@ export class JobExpiredError extends Error {
  * `e.pollUrl`. Extends `Error`, so existing `catch` blocks keep working.
  */
 export class JobTimeoutError extends Error {
+  /** Stable error code (#40335). */
+  readonly code: string = "job_timeout";
+  readonly retryable: boolean = false;
+  readonly retryAfterSeconds: number | null = null;
+  readonly nextAction: Record<string, unknown> | null = null;
+  readonly requestId: string | null = null;
   readonly jobId: string;
   readonly pollUrl: string;
 
@@ -2816,6 +3120,12 @@ export function getErrorHint(error: unknown): ForcedRenderHint | null {
  * timeout (job may still be running) or job expiry (result TTL elapsed).
  */
 export class JobFailedError extends Error {
+  /** Stable error code (#40335). */
+  readonly code: string = "job_failed";
+  readonly retryable: boolean = false;
+  readonly retryAfterSeconds: number | null = null;
+  readonly nextAction: Record<string, unknown> | null = null;
+  readonly requestId: string | null = null;
   readonly jobId: string;
   readonly status: JobStatus;
   /** Retry guidance from the job's `error.hint`, or `null` when absent. */
@@ -2888,6 +3198,17 @@ export class RateLimitError extends AxiosError {
   readonly failureCode: string | null;
   /** Retry guidance from `error.hint` or `detail.hint`, or null when absent. */
   readonly hint: ForcedRenderHint | null;
+  /** `false` when retrying cannot succeed before `retryAt` (spend limit); null when absent. */
+  readonly retryable: boolean | null;
+  /** Earliest useful retry time (ISO-8601) for a terminal 429, or null. */
+  readonly retryAt: string | null;
+
+  /** True for `spend_limit_exceeded` or `detail.retryable === false`: never sleep or retry. */
+  get terminal(): boolean {
+    return (
+      this.errorCode === "spend_limit_exceeded" || this.retryable === false
+    );
+  }
 
   constructor(source: AxiosError) {
     const response = source.response;
@@ -2928,6 +3249,9 @@ export class RateLimitError extends AxiosError {
           ? bodyRetry
           : null;
     this.errorCode = str(obj?.error);
+    this.retryable =
+      typeof detail?.retryable === "boolean" ? detail.retryable : null;
+    this.retryAt = str(detail?.retry_at);
     this.scope = str(detail?.scope) ?? header("x-ratelimit-scope");
     this.limit = typeof detail?.limit === "number" ? detail.limit : null;
     this.accountTier = str(detail?.account_tier);
@@ -3206,8 +3530,12 @@ export class AlterLab {
           this.logger.debug(
             `Non-retriable error ${status} on ${config.method} ${config.url}: ${axiosError.message}`,
           );
-          if (status === 402) throw new InsufficientFundsError(axiosError);
-          throw error;
+          if (status === 402) {
+            const funds = new InsufficientFundsError(axiosError);
+            applyTypedFields(funds, axiosError);
+            throw funds;
+          }
+          throw toTypedError(error);
         }
 
         let retryAfterMs = parseRetryAfterMs(
@@ -3216,6 +3544,7 @@ export class AlterLab {
         if (status === 429) {
           const rateLimitError = new RateLimitError(axiosError);
           lastError = rateLimitError;
+          if (rateLimitError.terminal) break;
           if (rateLimitError.retryAfter !== null) {
             retryAfterMs = rateLimitError.retryAfter * 1000;
           }
@@ -3253,7 +3582,14 @@ export class AlterLab {
     this.logger.error(
       `Giving up on ${config.method} ${config.url} after ${waited}ms of retry waits (maxRetries=${this.maxRetries})`,
     );
-    throw lastError || new Error("Request failed after retries");
+    // A 429 stays a RateLimitError: it carries terminal / retryAt / back-off fields (#40324,
+    // #36240) that the generated typed classes for spend_limit_exceeded and
+    // repeat_failure_backoff do not.
+    if (lastError instanceof RateLimitError) {
+      applyTypedFields(lastError, lastError);
+      throw lastError;
+    }
+    throw toTypedError(lastError) || new Error("Request failed after retries");
   }
 
   private sleep(ms: number): Promise<void> {
@@ -3565,10 +3901,24 @@ export class AlterLab {
     return this.scrape({ url: request.url, mode: "ocr" });
   }
 
-  async getUsage(): Promise<UsageStats> {
+  /**
+   * Usage statistics and balance. Pass `tag` to filter spend to one request
+   * tag (adds the `tag_*` fields); `since` (ISO 8601) bounds the tag window.
+   * `organizationId` is sent as the `X-Organization-Id` header when set.
+   */
+  async getUsage(
+    options: { tag?: string; since?: string; organizationId?: string } = {},
+  ): Promise<UsageStats> {
+    const params: Record<string, string> = {};
+    if (options.tag !== undefined) params.tag = options.tag;
+    if (options.since !== undefined) params.since = options.since;
     return this.requestWithRetry({
       method: "GET",
       url: "/api/v1/usage",
+      ...(Object.keys(params).length ? { params } : {}),
+      ...(options.organizationId !== undefined
+        ? { headers: { "X-Organization-Id": options.organizationId } }
+        : {}),
     });
   }
 
@@ -3582,11 +3932,16 @@ export class AlterLab {
       include_subdomains: request.includeSubdomains ?? false,
     };
 
+    if (request.tag !== undefined) payload.tag = request.tag;
+    if (request.approvalId !== undefined)
+      payload.approval_id = request.approvalId;
+    if (request.dryRun) payload.dry_run = true;
     if (request.includePatterns)
       payload.include_patterns = request.includePatterns;
     if (request.excludePatterns)
       payload.exclude_patterns = request.excludePatterns;
     if (request.formats) payload.formats = request.formats;
+    if (request.list) payload.list = request.list;
     if (request.extractionSchema)
       payload.extraction_schema = request.extractionSchema;
     if (request.extractionProfile)
@@ -3600,6 +3955,8 @@ export class AlterLab {
     if (request.webhookUrl) payload.webhook_url = request.webhookUrl;
     if (request.forceRefresh !== undefined)
       payload.force_refresh = request.forceRefresh;
+    if (request.tag !== undefined) payload.tag = request.tag;
+    if (request.dryRun !== undefined) payload.dry_run = request.dryRun;
     if (request.budget !== undefined) payload.budget = request.budget;
     if (request.cache !== undefined) payload.cache = request.cache;
     if (request.cacheTtl !== undefined) payload.cache_ttl = request.cacheTtl;
@@ -3687,6 +4044,24 @@ export class AlterLab {
       url: "/api/v1/batch",
       data: payload,
     });
+  }
+
+  /**
+   * Resubmit the items a batch rejected. `items` is the list you submitted;
+   * rejected entries in `response.jobs` are matched back by `index`. Returns
+   * `null` when nothing was rejected.
+   */
+  async resubmitRejected(
+    items: BatchScrapeRequest[],
+    response: Pick<BatchResponse, "jobs">,
+    webhookUrl?: string,
+  ): Promise<BatchResponse | null> {
+    const retry = (response.jobs ?? [])
+      .filter((job) => job.status === "rejected")
+      .map((job) => items[job.index])
+      .filter((item): item is BatchScrapeRequest => item !== undefined);
+    if (retry.length === 0) return null;
+    return this.batchScrape(retry, webhookUrl);
   }
 
   /** Get crawl status and optionally per-page results (paginated, filtered, sorted). */
@@ -3933,7 +4308,7 @@ export class AlterLab {
       if (axiosError.response?.status === 404) {
         throw new JobExpiredError(jobId);
       }
-      throw error;
+      throw toTypedError(error);
     }
   }
 
@@ -4255,6 +4630,123 @@ export class AlterLab {
     return this.requestWithRetry({
       method: "GET",
       url: `/api/v1/search/batch/${batchId}`,
+    });
+  }
+
+  /**
+   * Poll a batch (`GET /v1/batch/{batch_id}`). `paused` counts items held back
+   * by the `paused_low_success` stop; `paused_reason` says why.
+   */
+  async getBatchStatus(batchId: string): Promise<BatchStatusResponse> {
+    return this.requestWithRetry({
+      method: "GET",
+      url: `/api/v1/batch/${batchId}`,
+    });
+  }
+
+  /** Re-enqueue items a batch paused with `paused_low_success`. */
+  async resumeBatch(batchId: string): Promise<BatchResumeResponse> {
+    return this.requestWithRetry({
+      method: "POST",
+      url: `/api/v1/batch/${batchId}/resume`,
+    });
+  }
+
+  /** Poll a spend approval raised by `approval_above_usd` (GET /api/v1/approvals/{id}). */
+  async getApproval(approvalId: string): Promise<ApprovalStatus> {
+    return this.requestWithRetry({
+      method: "GET",
+      url: `/api/v1/approvals/${encodeURIComponent(approvalId)}`,
+    });
+  }
+
+  /** Read a request tag's `approval_above_usd` threshold. */
+  async getTagApproval(tag: string): Promise<TagApproval> {
+    return this.requestWithRetry({
+      method: "GET",
+      url: `/api/v1/usage-tags/${encodeURIComponent(tag)}/approval`,
+    });
+  }
+
+  /** Set (or clear with `null`) a request tag's `approval_above_usd` threshold. */
+  async setTagApproval(
+    tag: string,
+    approvalAboveUsd: number | null,
+  ): Promise<TagApproval> {
+    return this.requestWithRetry({
+      method: "PUT",
+      url: `/api/v1/usage-tags/${encodeURIComponent(tag)}/approval`,
+      data: { approval_above_usd: approvalAboveUsd },
+    });
+  }
+
+  /** Set spend limits for an API key (`PUT /api/v1/api-keys/{key_id}/limits`). */
+  async setKeyLimits(
+    keyId: string,
+    limits: SpendLimitConfig,
+  ): Promise<Record<string, unknown>> {
+    return this.requestWithRetry({
+      method: "PUT",
+      url: `/api/v1/api-keys/${encodeURIComponent(keyId)}/limits`,
+      data: limits,
+    });
+  }
+
+  /** Set account-wide spend limits (`PUT /api/v1/account/limits`). */
+  async setAccountLimits(
+    limits: SpendLimitConfig,
+  ): Promise<Record<string, unknown>> {
+    return this.requestWithRetry({
+      method: "PUT",
+      url: "/api/v1/account/limits",
+      data: limits,
+    });
+  }
+
+  /** Set spend limits for an OAuth grant (`PUT /api/v1/oauth-grants/{grant_id}/limits`). */
+  async setGrantLimits(
+    grantId: string,
+    limits: SpendLimitConfig,
+  ): Promise<Record<string, unknown>> {
+    return this.requestWithRetry({
+      method: "PUT",
+      url: `/api/v1/oauth-grants/${encodeURIComponent(grantId)}/limits`,
+      data: limits,
+    });
+  }
+
+  /** Run actions on a Hands task (`POST /api/v1/hands/tasks/{task_id}/act`). */
+  async handsAct(
+    taskId: string,
+    request: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    return this.requestWithRetry({
+      method: "POST",
+      url: `/api/v1/hands/tasks/${encodeURIComponent(taskId)}/act`,
+      data: request,
+    });
+  }
+
+  /** Vision-guided action on a Hands task (`POST /api/v1/hands/tasks/{task_id}/vision/act`). */
+  async handsVisionAct(
+    taskId: string,
+    request: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    return this.requestWithRetry({
+      method: "POST",
+      url: `/api/v1/hands/tasks/${encodeURIComponent(taskId)}/vision/act`,
+      data: request,
+    });
+  }
+
+  /** Create a Hands growth run (`POST /api/v1/hands/growth-run`). */
+  async createGrowthRun(
+    request: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    return this.requestWithRetry({
+      method: "POST",
+      url: "/api/v1/hands/growth-run",
+      data: request,
     });
   }
 

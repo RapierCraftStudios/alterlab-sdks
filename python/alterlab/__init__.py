@@ -71,6 +71,8 @@ from alterlab.document_types import (
     DocumentMedia,
     DocumentV1,
 )
+from alterlab import _transport as transport
+from alterlab._transport import ERROR_CLASSES, ERROR_CODES, ConnectionFailedError
 from alterlab.requests_compat import AlterLabHTTPError
 from alterlab.types import (
     ContentImage,
@@ -100,6 +102,10 @@ __all__ = [
     "RateLimitError",
     "JobExpiredError",
     "JobFailedError",
+    "ConnectionFailedError",
+    "ERROR_CODES",
+    "ERROR_CLASSES",
+    "transport",
     "ForcedRenderHint",
     "get_error_hint",
     "SessionIntegration",

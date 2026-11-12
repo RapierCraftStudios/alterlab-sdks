@@ -249,3 +249,78 @@ def test_backoff_is_jittered():
     with_hint = {_compute_retry_sleep(0, 1.0, 10.0) for _ in range(50)}
     assert len(with_hint) > 1
     assert all(10.0 <= s <= 12.0 for s in with_hint)
+
+
+def _spend_body(**detail_extra):
+    return {
+        "error": "spend_limit_exceeded",
+        "message": "API key budget limit reached.",
+        "detail": {
+            "scope": "key_budget",
+            "limit": 5_000_000,
+            "retry_after_seconds": 60,
+            "retryable": False,
+            "retry_at": "2026-11-11T07:00:00+00:00",
+            **detail_extra,
+        },
+        "docs_url": "https://alterlab.io/docs/reference/limits",
+    }
+
+
+@pytest.mark.asyncio
+async def test_spend_limit_exceeded_is_terminal_never_sleeps(sleeps):
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        return httpx.Response(429, json=_spend_body(), headers={"Retry-After": "1"})
+
+    client = _make_client(handler, max_retries=3)
+    with pytest.raises(RateLimitError) as exc_info:
+        await client.get_usage()
+    assert exc_info.value.terminal is True
+    assert exc_info.value.retryable is False
+    assert exc_info.value.retry_at == "2026-11-11T07:00:00+00:00"
+    assert len(calls) == 1
+    assert sleeps == []
+
+
+@pytest.mark.asyncio
+async def test_retryable_false_alone_is_terminal(sleeps):
+    calls = []
+    body = _spend_body()
+    body["error"] = "other_error"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        return httpx.Response(429, json=body, headers={"Retry-After": "1"})
+
+    client = _make_client(handler, max_retries=3)
+    with pytest.raises(RateLimitError):
+        await client.get_usage()
+    assert len(calls) == 1
+    assert sleeps == []
+
+
+@pytest.mark.asyncio
+async def test_transient_429_still_retries(sleeps):
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        return httpx.Response(
+            429,
+            json={
+                "error": "rate_limit_exceeded",
+                "message": "slow down",
+                "detail": {"scope": "account", "retry_after_seconds": 1},
+            },
+            headers={"Retry-After": "1"},
+        )
+
+    client = _make_client(handler, max_retries=3)
+    with pytest.raises(RateLimitError) as exc_info:
+        await client.get_usage()
+    assert exc_info.value.terminal is False
+    assert len(calls) == 3
+    assert len(sleeps) == 2

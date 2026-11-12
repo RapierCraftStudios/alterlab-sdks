@@ -84,6 +84,35 @@ export class AccountNamespace extends Base {
   usage(): Promise<Fields> {
     return this.call("GET", "/api/v1/usage");
   }
+  /**
+   * Spend and request counts per request tag. Without `tag`: every tag with
+   * its cap (`GET /api/v1/usage/tags`). With `tag`: usage filtered to it
+   * (`GET /api/v1/usage?tag=`). Failed and refunded requests are excluded.
+   */
+  usageByTag(options: { tag?: string; since?: string } = {}): Promise<Fields> {
+    const params = clean({ tag: options.tag, since: options.since });
+    return this.call(
+      "GET",
+      options.tag !== undefined ? "/api/v1/usage" : "/api/v1/usage/tags",
+      { params },
+    );
+  }
+  /**
+   * Cap a tag's spend (`PUT /api/v1/usage/tags/{tag}`). New work for the tag
+   * is rejected with 402 `tag_budget_exhausted` once billed spend plus
+   * in-flight reservations reach the cap; in-flight work is not cancelled.
+   */
+  setTagBudget(
+    tag: string,
+    options: { maxSpendUsd: number; expiresAt?: string },
+  ): Promise<Fields> {
+    return this.call("PUT", `/api/v1/usage/tags/${seg(tag)}`, {
+      data: clean({
+        max_spend_usd: options.maxSpendUsd,
+        expires_at: options.expiresAt,
+      }),
+    });
+  }
 }
 
 export class SupportNamespace extends Base {

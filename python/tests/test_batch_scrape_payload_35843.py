@@ -69,6 +69,21 @@ async def test_batch_scrape_includes_webhook_url_only_when_given():
     assert body == {"urls": ITEMS, "webhook_url": "https://myapp.com/webhook"}
 
 
+@pytest.mark.asyncio
+async def test_batch_scrape_sends_max_in_flight_per_domain_only_when_given():
+    captured = []
+    client = _make_client(captured)
+
+    await client.batch_scrape(ITEMS, max_in_flight_per_domain=3)
+    await client.batch_scrape(ITEMS)
+
+    assert json.loads(captured[0].content) == {
+        "urls": ITEMS,
+        "max_in_flight_per_domain": 3,
+    }
+    assert "max_in_flight_per_domain" not in json.loads(captured[1].content)
+
+
 def test_sync_batch_scrape_sends_urls_field():
     captured = []
     sync_client = AlterLabSync(api_key="sk_test_dummy")
