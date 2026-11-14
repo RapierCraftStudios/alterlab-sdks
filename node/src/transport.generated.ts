@@ -130,7 +130,10 @@ export interface BatchItemStatus {
   job_id: string;
   url: string;
   status: string;
+  /** Full job result. Only returned with `include=results`; otherwise fetch it from `result_url`. */
   result?: Record<string, unknown> | null;
+  /** Path of this item's job (`GET /api/v1/jobs/{job_id}`), which returns its full result. */
+  result_url?: string | null;
   error?: string | null;
   next_action?: Record<string, unknown> | null;
   error_detail?: Record<string, unknown> | null;
@@ -190,7 +193,7 @@ export interface BatchRequest {
   approval_id?: string | null;
   /** Optional cap on this batch's concurrent jobs per registrable domain. Can only lower the adaptive dispatch window, never raise it. */
   max_in_flight_per_domain?: number | null;
-  /** When true, items over your global or per-domain concurrency limit are queued (job status `queued`) and start as slots free, for up to 15 minutes. An item still queued after that fails with `queue_expired` and is refunded. When false, those items are rejected in `rejected_items`. Items over the sustained rate limit (`global_rate`) are always rejected. */
+  /** When true and the over-limit queue is enabled for your account, items over your global or per-domain concurrency limit are queued (job status `queued`) and start as slots free, for up to 15 minutes. While the queue is not enabled for your account, those items are rejected in `rejected_items` as with false. An item still queued after that fails with `queue_expired` and is refunded. When false, those items are rejected in `rejected_items`. Items over the sustained rate limit (`global_rate`) are always rejected. */
   queue_over_limit: boolean;
   /** Webhook URL to receive batch.completed event when all jobs finish */
   webhook_url?: string | null;
@@ -251,7 +254,26 @@ export interface BatchStatusResponse {
   paused: number;
   /** Machine-readable reason a domain was paused: `code`, `domain`, `detector_class`, `failures`, `window`, `failure_rate`, `threshold`. */
   paused_reason?: Record<string, unknown> | null;
+  /** At most one recurring-use suggestion once the batch completes (#40690); never auto-created. */
+  suggestions?: Array<Record<string, unknown>> | null;
+  /** Per-job status for the accepted items. Empty with `include=counts`; paged by `limit`/`offset`. `result` is only filled with `include=results`. */
   items: BatchItemStatus[];
+  /** URLs submitted in the batch request (accepted + rejected). `total` counts only the accepted jobs. Null for batches created before this field existed. */
+  submitted?: number | null;
+  /** Submitted URLs that got no job (see `rejected_items`); never charged. */
+  rejected: number;
+  /** Submitted URLs rejected at submission, with scope and retry_after_seconds. Omitted with `include=counts`. */
+  rejected_items?: BatchRejectedItem[] | null;
+  /** One entry per submitted URL in submission order, as returned by POST /batch. Omitted with `include=counts`. */
+  jobs?: BatchJobEntry[] | null;
+  /** Detail level of this response: counts, items or results. */
+  include: string;
+  /** Page size applied to `items`. */
+  limit?: number | null;
+  /** Index of the first returned entry of `items`. */
+  offset: number;
+  /** Offset of the next page of `items`; null on the last page. */
+  next_offset?: number | null;
   created_at: string;
   export_status?: string | null;
   export_error?: string | null;
@@ -727,19 +749,24 @@ export const ERROR_CODES = [
   "client_error",
   "conflict",
   "crawl_concurrency_limit_reached",
+  "fetch_failed",
   "forbidden",
   "gateway_timeout",
   "insufficient_credits",
   "internal_error",
   "invalid_input",
+  "invalid_manifest",
   "invalid_version",
   "listing_degraded",
+  "listing_internal_error",
   "listing_not_found",
   "listing_run_not_found",
   "listing_run_unavailable",
+  "listing_timeout",
   "method_not_allowed",
   "network_error",
   "not_found",
+  "parse_failed",
   "payload_too_large",
   "rate_limit_exceeded",
   "rate_limited",
@@ -964,6 +991,11 @@ export class CrawlConcurrencyLimitReachedError extends AlterLabError {
   static readonly errorCode = "crawl_concurrency_limit_reached";
 }
 
+/** Typed error for code `fetch_failed`. */
+export class FetchFailedError extends AlterLabError {
+  static readonly errorCode = "fetch_failed";
+}
+
 /** Typed error for code `forbidden`. */
 export class ForbiddenError extends AlterLabError {
   static readonly errorCode = "forbidden";
@@ -984,6 +1016,11 @@ export class InvalidInputError extends AlterLabError {
   static readonly errorCode = "invalid_input";
 }
 
+/** Typed error for code `invalid_manifest`. */
+export class InvalidManifestError extends AlterLabError {
+  static readonly errorCode = "invalid_manifest";
+}
+
 /** Typed error for code `invalid_version`. */
 export class InvalidVersionError extends AlterLabError {
   static readonly errorCode = "invalid_version";
@@ -992,6 +1029,11 @@ export class InvalidVersionError extends AlterLabError {
 /** Typed error for code `listing_degraded`. */
 export class ListingDegradedError extends AlterLabError {
   static readonly errorCode = "listing_degraded";
+}
+
+/** Typed error for code `listing_internal_error`. */
+export class ListingInternalError extends AlterLabError {
+  static readonly errorCode = "listing_internal_error";
 }
 
 /** Typed error for code `listing_not_found`. */
@@ -1009,6 +1051,11 @@ export class ListingRunUnavailableError extends AlterLabError {
   static readonly errorCode = "listing_run_unavailable";
 }
 
+/** Typed error for code `listing_timeout`. */
+export class ListingTimeoutError extends AlterLabError {
+  static readonly errorCode = "listing_timeout";
+}
+
 /** Typed error for code `method_not_allowed`. */
 export class MethodNotAllowedError extends AlterLabError {
   static readonly errorCode = "method_not_allowed";
@@ -1022,6 +1069,11 @@ export class NetworkError extends AlterLabError {
 /** Typed error for code `not_found`. */
 export class NotFoundError extends AlterLabError {
   static readonly errorCode = "not_found";
+}
+
+/** Typed error for code `parse_failed`. */
+export class ParseFailedError extends AlterLabError {
+  static readonly errorCode = "parse_failed";
 }
 
 /** Typed error for code `payload_too_large`. */
@@ -1089,18 +1141,23 @@ export const ERROR_CLASSES: Record<string, ErrorClass> = {
   "client_error": ClientError,
   "conflict": ConflictError,
   "crawl_concurrency_limit_reached": CrawlConcurrencyLimitReachedError,
+  "fetch_failed": FetchFailedError,
   "forbidden": ForbiddenError,
   "gateway_timeout": GatewayTimeoutError,
   "internal_error": InternalError,
   "invalid_input": InvalidInputError,
+  "invalid_manifest": InvalidManifestError,
   "invalid_version": InvalidVersionError,
   "listing_degraded": ListingDegradedError,
+  "listing_internal_error": ListingInternalError,
   "listing_not_found": ListingNotFoundError,
   "listing_run_not_found": ListingRunNotFoundError,
   "listing_run_unavailable": ListingRunUnavailableError,
+  "listing_timeout": ListingTimeoutError,
   "method_not_allowed": MethodNotAllowedError,
   "network_error": NetworkError,
   "not_found": NotFoundError,
+  "parse_failed": ParseFailedError,
   "payload_too_large": PayloadTooLargeError,
   "repeat_failure_backoff": RepeatFailureBackoffError,
   "request_cancelled": RequestCancelledError,

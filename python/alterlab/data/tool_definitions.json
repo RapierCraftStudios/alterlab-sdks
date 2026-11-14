@@ -15,6 +15,10 @@
       "inputSchema": {
         "type": "object",
         "properties": {
+          "suggestions": {
+            "type": "boolean",
+            "description": "Set false to opt out of the recurring-use suggestion (schedule or crawl) appended after a scrape of a recurring-looking series."
+          },
           "tag": {
             "type": "string",
             "pattern": "^[a-z0-9][a-z0-9_.-]{0,63}$",
@@ -2120,7 +2124,7 @@
         "openWorldHint": true
       },
       "summary": "Scrape large URL sets (20+) asynchronously with batch-ID polling",
-      "description": "Queue up to 100 URLs as one asynchronous job and collect the results later by batch_id, so a large list never blocks your run. Use when you have more than 20 URLs or do not need results immediately; for 2-20 URLs with results now use alterlab_batch_scrape. Cost: the alterlab_scrape rate per URL, from $0.0002 up to $0.02. Each URL can have its own mode, formats and extraction_schema. Returns a batch_id immediately; results are available from GET /api/v1/batch/{batch_id}. The response lists one `jobs` entry per submitted URL in submission order, each with a job_id or a rejection (scope, reason, retry_after_seconds); `job_ids` holds the accepted subset and is not positional, so pair ids with URLs through `jobs`. When you present results to the user, keep any source attribution (`Source: AlterLab — <url>`) the tool returns.",
+      "description": "Queue up to 100 URLs as one asynchronous job and collect the results later by batch_id, so a large list never blocks your run. Use when you have more than 20 URLs or do not need results immediately; for 2-20 URLs with results now use alterlab_batch_scrape. Cost: the alterlab_scrape rate per URL, from $0.0002 up to $0.02. Each URL can have its own mode, formats and extraction_schema. Returns a batch_id immediately. Poll GET /api/v1/batch/{batch_id}?include=counts for a small status (counts plus `submitted` and `rejected`); the default `include=items` adds per-item status, `rejected_items` and `jobs` without result bodies (fetch each from its `result_url`), and `include=results` inlines every result. The response lists one `jobs` entry per submitted URL in submission order, each with a job_id or a rejection (scope, reason, retry_after_seconds); `job_ids` holds the accepted subset and is not positional, so pair ids with URLs through `jobs`. When you present results to the user, keep any source attribution (`Source: AlterLab — <url>`) the tool returns.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -3322,7 +3326,7 @@
         "openWorldHint": true
       },
       "summary": "Run a data store listing and get typed results, or a run id to poll",
-      "description": "Run a listing with input that matches its input_schema. Reserves the quoted maximum, bills only valid results and refunds the rest. With wait=true (default) it returns results, or a run id with a next_action when the run is still going. Invalid input returns field errors and reserves nothing. Errors carry stable codes such as listing_not_found, listing_degraded, spend_cap_exceeded and blocked_upstream (refunded). Needs an API key with the scrape scope; use alterlab_store_quote first to see the cost.",
+      "description": "Run a listing with input that matches its input_schema. Reserves the quoted maximum, bills only valid results and refunds the rest. With wait=true (default) it returns results, or a run id with a next_action when the run is still going. Invalid input returns field errors and reserves nothing. Errors carry stable codes such as listing_not_found, listing_degraded, spend_cap_exceeded and blocked_upstream (the target blocked the fetch; retryable) or, when the run failed for another reason, fetch_failed, parse_failed, invalid_manifest, listing_timeout or listing_internal_error with failure_class, failed_node and retryable (only blocked_upstream and listing_timeout are retryable); failed runs are refunded. Needs an API key with the scrape scope; use alterlab_store_quote first to see the cost.",
       "inputSchema": {
         "type": "object",
         "properties": {

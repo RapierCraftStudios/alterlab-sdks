@@ -430,6 +430,8 @@ export type ExtractionSelectors = Record<string, ExtractionSelector>;
 
 export interface ScrapeRequest {
   url: string;
+  /** Set false to opt out of the recurring-use `suggestions` item on the response. */
+  suggestions?: boolean;
   /** Spend-attribution tag (^[a-z0-9][a-z0-9_.-]{0,63}$, max 20 active tags per organization); echoed in the response. */
   tag?: string | null;
   mode?: "auto" | "html" | "js" | "pdf" | "ocr";
@@ -824,7 +826,21 @@ export interface DiscoveryHint {
   why: string;
 }
 
+/** Recurring-use suggestion (#40690): `create` is the exact body for `endpoint`; never auto-created. */
+export interface RecurringSuggestion {
+  type: "schedule" | "crawl";
+  reason: string;
+  tool?: string | null;
+  endpoint: string;
+  create: Record<string, unknown>;
+  estimated_run_cost_microcents: number;
+  estimated_monthly_cost_microcents: number;
+  docs_url: string;
+}
+
 export interface ScrapeResponse {
+  /** At most one schedule or crawl suggestion; present only for a recurring-looking series. */
+  suggestions?: RecurringSuggestion[] | null;
   /** Request tag echoed from the submitted request, if any. */
   tag?: string | null;
   /** Cost in USD as an exact decimal string (credits fields are microcents: 1 credit = $0.000001). */
@@ -4635,12 +4651,29 @@ export class AlterLab {
 
   /**
    * Poll a batch (`GET /v1/batch/{batch_id}`). `paused` counts items held back
-   * by the `paused_low_success` stop; `paused_reason` says why.
+   * by the `paused_low_success` stop; `paused_reason` says why. `submitted` and
+   * `rejected_items` report URLs that got no job.
+   *
+   * Poll with `{ include: "counts" }` for a small response; the default
+   * (`"items"`) lists items without result bodies (each has a `result_url`);
+   * `"results"` inlines every result. `limit`/`offset` page the items.
    */
-  async getBatchStatus(batchId: string): Promise<BatchStatusResponse> {
+  async getBatchStatus(
+    batchId: string,
+    options: {
+      include?: "counts" | "items" | "results";
+      limit?: number;
+      offset?: number;
+    } = {},
+  ): Promise<BatchStatusResponse> {
+    const params: Record<string, string | number> = {};
+    if (options.include !== undefined) params.include = options.include;
+    if (options.limit !== undefined) params.limit = options.limit;
+    if (options.offset !== undefined) params.offset = options.offset;
     return this.requestWithRetry({
       method: "GET",
       url: `/api/v1/batch/${batchId}`,
+      ...(Object.keys(params).length ? { params } : {}),
     });
   }
 

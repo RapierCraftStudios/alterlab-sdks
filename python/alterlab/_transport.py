@@ -143,6 +143,7 @@ class BatchItemStatus(_BatchItemStatusRequired, total=False):
     """BatchItemStatus."""
 
     result: Union[Dict[str, Any], None]
+    result_url: Union[str, None]
     error: Union[str, None]
     next_action: Union[Dict[str, Any], None]
     error_detail: Union[Dict[str, Any], None]
@@ -262,6 +263,9 @@ _BatchStatusResponseRequired = TypedDict(
         "pending": int,
         "paused": int,
         "items": List["BatchItemStatus"],
+        "rejected": int,
+        "include": str,
+        "offset": int,
         "created_at": str,
         "webhook_attempts": int,
         "credits_used": int,
@@ -275,6 +279,12 @@ class BatchStatusResponse(_BatchStatusResponseRequired, total=False):
 
     attribution: Union["Attribution", None]
     paused_reason: Union[Dict[str, Any], None]
+    suggestions: Union[List[Dict[str, Any]], None]
+    submitted: Union[int, None]
+    rejected_items: Union[List["BatchRejectedItem"], None]
+    jobs: Union[List["BatchJobEntry"], None]
+    limit: Union[int, None]
+    next_offset: Union[int, None]
     export_status: Union[str, None]
     export_error: Union[str, None]
     webhook_status: Union[str, None]
@@ -823,19 +833,24 @@ ERROR_CODES = (
     "client_error",
     "conflict",
     "crawl_concurrency_limit_reached",
+    "fetch_failed",
     "forbidden",
     "gateway_timeout",
     "insufficient_credits",
     "internal_error",
     "invalid_input",
+    "invalid_manifest",
     "invalid_version",
     "listing_degraded",
+    "listing_internal_error",
     "listing_not_found",
     "listing_run_not_found",
     "listing_run_unavailable",
+    "listing_timeout",
     "method_not_allowed",
     "network_error",
     "not_found",
+    "parse_failed",
     "payload_too_large",
     "rate_limit_exceeded",
     "rate_limited",
@@ -1014,6 +1029,12 @@ class CrawlConcurrencyLimitReachedError(AlterLabAPIError):
     code = "crawl_concurrency_limit_reached"
 
 
+class FetchFailedError(AlterLabAPIError):
+    """Typed error for code ``fetch_failed``."""
+
+    code = "fetch_failed"
+
+
 class ForbiddenError(AlterLabAPIError):
     """Typed error for code ``forbidden``."""
 
@@ -1040,6 +1061,12 @@ class InvalidInputError(AlterLabAPIError):
     code = "invalid_input"
 
 
+class InvalidManifestError(AlterLabAPIError):
+    """Typed error for code ``invalid_manifest``."""
+
+    code = "invalid_manifest"
+
+
 class InvalidVersionError(AlterLabAPIError):
     """Typed error for code ``invalid_version``."""
 
@@ -1050,6 +1077,12 @@ class ListingDegradedError(AlterLabAPIError):
     """Typed error for code ``listing_degraded``."""
 
     code = "listing_degraded"
+
+
+class ListingInternalError(AlterLabAPIError):
+    """Typed error for code ``listing_internal_error``."""
+
+    code = "listing_internal_error"
 
 
 class ListingNotFoundError(AlterLabAPIError):
@@ -1070,6 +1103,12 @@ class ListingRunUnavailableError(AlterLabAPIError):
     code = "listing_run_unavailable"
 
 
+class ListingTimeoutError(AlterLabAPIError):
+    """Typed error for code ``listing_timeout``."""
+
+    code = "listing_timeout"
+
+
 class MethodNotAllowedError(AlterLabAPIError):
     """Typed error for code ``method_not_allowed``."""
 
@@ -1080,6 +1119,12 @@ class NotFoundError(AlterLabAPIError):
     """Typed error for code ``not_found``."""
 
     code = "not_found"
+
+
+class ParseFailedError(AlterLabAPIError):
+    """Typed error for code ``parse_failed``."""
+
+    code = "parse_failed"
 
 
 class PayloadTooLargeError(AlterLabAPIError):
@@ -1149,18 +1194,23 @@ ERROR_CLASSES: Dict[str, Type[AlterLabAPIError]] = {
     "client_error": ClientError,
     "conflict": ConflictError,
     "crawl_concurrency_limit_reached": CrawlConcurrencyLimitReachedError,
+    "fetch_failed": FetchFailedError,
     "forbidden": ForbiddenError,
     "gateway_timeout": GatewayTimeoutError,
     "insufficient_credits": InsufficientCreditsError,
     "internal_error": InternalError,
     "invalid_input": InvalidInputError,
+    "invalid_manifest": InvalidManifestError,
     "invalid_version": InvalidVersionError,
     "listing_degraded": ListingDegradedError,
+    "listing_internal_error": ListingInternalError,
     "listing_not_found": ListingNotFoundError,
     "listing_run_not_found": ListingRunNotFoundError,
     "listing_run_unavailable": ListingRunUnavailableError,
+    "listing_timeout": ListingTimeoutError,
     "method_not_allowed": MethodNotAllowedError,
     "not_found": NotFoundError,
+    "parse_failed": ParseFailedError,
     "payload_too_large": PayloadTooLargeError,
     "rate_limit_exceeded": RateLimitExceededError,
     "rate_limited": RateLimitedError,

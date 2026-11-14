@@ -176,6 +176,21 @@ class TierEscalationDetail(Dict[str, Any]):
     """
 
 
+class RecurringSuggestion(Dict[str, Any]):
+    """Recurring-use suggestion in ``response["suggestions"]`` (#40690).
+
+    Fields:
+        type: ``"schedule"`` or ``"crawl"``.
+        reason: Why the run looks recurring.
+        tool: MCP tool to call (``alterlab_schedule``), or None.
+        endpoint: REST endpoint that accepts ``create`` unchanged.
+        create: Prefilled request body for that endpoint.
+        estimated_run_cost_microcents: Cost of one run.
+        estimated_monthly_cost_microcents: Cost per month at a daily cron.
+        docs_url: Documentation link.
+    """
+
+
 class BillingDetails(Dict[str, Any]):
     """Detailed billing breakdown returned in every scrape response.
 
@@ -1436,6 +1451,7 @@ class AlterLab(ResearchMixin, ParityMixin):
         response: Optional[Literal["full", "minimal"]] = None,
         extraction_selectors: Optional[Dict[str, Dict[str, Any]]] = None,
         tag: Optional[str] = None,
+        suggestions: Optional[bool] = None,
     ) -> Dict[str, Any]:
         """Scrape a URL using the unified AlterLab API endpoint.
 
@@ -1626,10 +1642,14 @@ class AlterLab(ResearchMixin, ParityMixin):
             poll_max_interval: Maximum polling interval (seconds)
             tag: Optional spend-attribution tag (``^[a-z0-9][a-z0-9_.-]{0,63}$``); stored on
                 usage rows and echoed in the response.
+            suggestions: Pass ``False`` to opt out of the recurring-use ``suggestions`` item.
 
         Returns:
             Scrape response dictionary with content, metadata, and billing details.
             Key fields include:
+            - ``suggestions`` (Optional[List[RecurringSuggestion]]): at most one schedule or
+              crawl suggestion with a prefilled ``create`` body, present only for a
+              recurring-looking series; nothing is created for you.
             - ``url``, ``status_code``, ``content``, ``headers``, ``cached``
             - ``age_seconds``, ``fetched_at``, ``cache_tier``: freshness of the result (the
               ``X-Cache`` response header is ``HIT`` or ``MISS``).
@@ -1850,6 +1870,8 @@ class AlterLab(ResearchMixin, ParityMixin):
         }
         if response is not None:
             payload["response"] = response
+        if suggestions is not None:
+            payload["suggestions"] = suggestions
 
         # Add advanced options
         if advanced:
@@ -3231,13 +3253,34 @@ class AlterLab(ResearchMixin, ParityMixin):
         )
         return response.json()
 
-    async def get_batch_status(self, batch_id: str) -> Dict[str, Any]:
+    async def get_batch_status(
+        self,
+        batch_id: str,
+        include: Optional[str] = None,
+        limit: Optional[int] = None,
+        offset: Optional[int] = None,
+    ) -> Dict[str, Any]:
         """Poll a batch (GET /api/v1/batch/{batch_id}).
 
         ``paused`` counts items held back by the ``paused_low_success`` stop and
-        ``paused_reason`` carries the machine-readable cause.
+        ``paused_reason`` carries the machine-readable cause. ``submitted`` and
+        ``rejected_items`` report URLs that got no job.
+
+        Poll with ``include="counts"`` for a small response; the default
+        (``"items"``) lists items without result bodies (each item has a
+        ``result_url``); ``include="results"`` inlines every result.
+        ``limit``/``offset`` page the items.
         """
-        response = await self._request_with_retry("GET", f"/api/v1/batch/{batch_id}")
+        params: Dict[str, Any] = {}
+        if include is not None:
+            params["include"] = include
+        if limit is not None:
+            params["limit"] = limit
+        if offset is not None:
+            params["offset"] = offset
+        response = await self._request_with_retry(
+            "GET", f"/api/v1/batch/{batch_id}", params=params if params else None
+        )
         return response.json()
 
     async def resume_batch(self, batch_id: str) -> Dict[str, Any]:
