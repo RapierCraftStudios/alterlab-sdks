@@ -1145,10 +1145,10 @@ export interface ResponseMeta {
  * | Tier        | Balance    | RPM   | Concurrent |
  * |-------------|------------|-------|------------|
  * | Free        | $0–$5      | 30    | 3          |
- * | Basic       | $5–$50     | 60    | 10         |
- * | Growth      | $50–$200   | 100   | 15         |
- * | Scale       | $200–$500  | 300   | 25         |
- * | High Volume | $500+      | 500   | 50         |
+ * | Basic       | $5–$50     | 3000  | 10         |
+ * | Growth      | $50–$200   | 3000  | 15         |
+ * | Scale       | $200–$500  | 3000  | 25         |
+ * | High Volume | $500+      | 3000  | 50         |
  * | Enterprise  | Custom     | 10000 | 500        |
  */
 export interface TierInfo {
@@ -1156,8 +1156,13 @@ export interface TierInfo {
   name: string;
   /** Machine-readable tier identifier, e.g. `"free"`, `"basic"`, `"growth"`. */
   slug: string;
-  /** Maximum API requests per minute allowed at this tier. */
+  /**
+   * Sustained write (submission) rate enforced at this tier, per minute. Paid tiers are
+   * enforced at least 3000/min; `GET /api/v1/usage/limits` is the authoritative view.
+   */
   requests_per_minute: number;
+  /** Per-minute budget of the separate read/poll bucket. */
+  rpm_read?: number;
   /** Maximum number of concurrent scrape requests allowed at this tier. */
   concurrent_requests: number;
   /** Minimum account balance (USD) required to qualify for this tier. */
@@ -1904,6 +1909,8 @@ export interface JobStatusResponse {
   result?: ScrapeResponse;
   /** Failure detail: a message or a structured error (may carry `hint`). */
   error?: string | Record<string, unknown>;
+  /** Next-step guidance for a failed job (#40689), when sent at job level. */
+  next_action?: Record<string, unknown> | null;
   created_at?: string;
   completed_at?: string;
 }
@@ -3136,24 +3143,67 @@ export function getErrorHint(error: unknown): ForcedRenderHint | null {
  * timeout (job may still be running) or job expiry (result TTL elapsed).
  */
 export class JobFailedError extends Error {
-  /** Stable error code (#40335). */
-  readonly code: string = "job_failed";
-  readonly retryable: boolean = false;
-  readonly retryAfterSeconds: number | null = null;
-  readonly nextAction: Record<string, unknown> | null = null;
+  /**
+   * Stable error code (#40335): the job's `error.error_code` when the API
+   * sent one, otherwise `"job_failed"`.
+   */
+  readonly code: string;
+  /** The job's `error.error_code`, or `null` when absent (#41159). */
+  readonly errorCode: string | null;
+  readonly retryable: boolean;
+  readonly retryAfterSeconds: number | null;
+  /** Whether the failed job was charged, or `null` when the API did not say. */
+  readonly charged: boolean | null;
+  /** The API's auto-retry disposition (e.g. `"none"`), or `null`. */
+  readonly autoRetry: string | null;
+  readonly nextAction: Record<string, unknown> | null;
   readonly requestId: string | null = null;
   readonly jobId: string;
   readonly status: JobStatus;
   /** Retry guidance from the job's `error.hint`, or `null` when absent. */
   readonly hint: ForcedRenderHint | null;
 
+  /**
+   * @param envelope The failed job's `error` value and `next_action`; the
+   *   failure envelope fields (#40689) are read from them.
+   */
   constructor(
     jobId: string,
     status: JobStatus,
     detail: string,
     hint: ForcedRenderHint | null = null,
+    envelope: {
+      error?: unknown;
+      next_action?: unknown;
+    } = {},
   ) {
     super(`Job ${jobId} ended with status '${status}': ${detail}`);
+    const err: Record<string, unknown> =
+      envelope.error && typeof envelope.error === "object"
+        ? (envelope.error as Record<string, unknown>)
+        : {};
+    const asRecord = (v: unknown): Record<string, unknown> | null =>
+      v && typeof v === "object" && !Array.isArray(v)
+        ? (v as Record<string, unknown>)
+        : null;
+    const nextAction =
+      asRecord(err.next_action) ?? asRecord(envelope.next_action);
+    const pick = (key: string): unknown =>
+      err[key] !== undefined ? err[key] : nextAction?.[key];
+    const errorCode = pick("error_code");
+    const retryAfter = pick("retry_after_s");
+    const autoRetry = pick("auto_retry");
+    this.errorCode =
+      typeof errorCode === "string" && errorCode ? errorCode : null;
+    this.code = this.errorCode ?? "job_failed";
+    this.retryable = pick("retryable") === true;
+    this.retryAfterSeconds = typeof retryAfter === "number" ? retryAfter : null;
+    this.charged =
+      typeof pick("charged") === "boolean"
+        ? (pick("charged") as boolean)
+        : null;
+    this.autoRetry = typeof autoRetry === "string" ? autoRetry : null;
+    this.nextAction = nextAction;
     this.name = "JobFailedError";
     this.jobId = jobId;
     this.status = status;
@@ -4392,6 +4442,10 @@ export class AlterLab {
           job.status,
           detail,
           errorObjectHint(jobError),
+          {
+            error: jobError,
+            next_action: (job as { next_action?: unknown }).next_action,
+          },
         );
       }
       if (

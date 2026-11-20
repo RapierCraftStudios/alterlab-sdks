@@ -2,7 +2,7 @@
 
 from typing import Any, Dict, List, Literal, Optional
 
-from typing_extensions import TypedDict
+from typing_extensions import NotRequired, TypedDict
 
 
 class ContentImage(TypedDict, total=False):
@@ -102,10 +102,10 @@ class TierInfo(TypedDict):
     | Tier         | Balance   |  RPM  | Concurrent  |
     +==============+===========+=======+=============+
     | Free         | $0–$5     |  30   |      3      |
-    | Basic        | $5–$50    |  60   |     10      |
-    | Growth       | $50–$200  | 100   |     15      |
-    | Scale        | $200–$500 | 300   |     25      |
-    | High Volume  | $500+     | 500   |     50      |
+    | Basic        | $5–$50    | 3000  |     10      |
+    | Growth       | $50–$200  | 3000  |     15      |
+    | Scale        | $200–$500 | 3000  |     25      |
+    | High Volume  | $500+     | 3000  |     50      |
     | Enterprise   | Custom    | 10000 |    500      |
     +--------------+-----------+-------+-------------+
     """
@@ -117,7 +117,13 @@ class TierInfo(TypedDict):
     """Machine-readable tier identifier, e.g. ``'free'``, ``'basic'``, ``'growth'``."""
 
     requests_per_minute: int
-    """Maximum API requests per minute allowed at this tier."""
+    """Sustained write (submission) rate enforced at this tier, per minute.
+
+    Paid tiers are enforced at least 3000/min. ``GET /api/v1/usage/limits`` is the
+    authoritative per-account view (``rpm_write``, ``rpm_read``, ``concurrency``)."""
+
+    rpm_read: NotRequired[int]
+    """Per-minute budget of the separate read/poll bucket."""
 
     concurrent_requests: int
     """Maximum number of concurrent scrape requests allowed at this tier."""

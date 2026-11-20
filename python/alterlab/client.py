@@ -1048,10 +1048,49 @@ class JobFailedError(AlterLabAPIError):
 
     code = "job_failed"
 
-    def __init__(self, job_id: str, status: str, detail: str):
+    def __init__(
+        self,
+        job_id: str,
+        status: str,
+        detail: str,
+        next_action: Optional[Dict[str, Any]] = None,
+    ):
         self.job_id = job_id
         self.status = status
         self.detail = detail
+        # Failure envelope (#40689, #41159): read from the job's ``error``
+        # object, falling back to ``error.next_action`` / the job-level
+        # ``next_action``.
+        err = detail if isinstance(detail, dict) else {}
+        action = err.get("next_action")
+        if not isinstance(action, dict):
+            action = next_action if isinstance(next_action, dict) else None
+        self.next_action: Optional[Dict[str, Any]] = action
+
+        def pick(key: str) -> Any:
+            if err.get(key) is not None:
+                return err[key]
+            return action.get(key) if action else None
+
+        error_code = pick("error_code")
+        self.error_code: Optional[str] = (
+            error_code if isinstance(error_code, str) and error_code else None
+        )
+        self.code = self.error_code or "job_failed"
+        self.retryable: bool = pick("retryable") is True
+        retry_after = pick("retry_after_s")
+        self.retry_after_s: Optional[int] = (
+            retry_after
+            if isinstance(retry_after, (int, float))
+            and not isinstance(retry_after, bool)
+            else None
+        )
+        charged = pick("charged")
+        self.charged: Optional[bool] = charged if isinstance(charged, bool) else None
+        auto_retry = pick("auto_retry")
+        self.auto_retry: Optional[str] = (
+            auto_retry if isinstance(auto_retry, str) else None
+        )
         # The job's ``error`` object may carry a retry hint (``error.hint``).
         self.hint = (
             _coerce_hint(detail.get("hint")) if isinstance(detail, dict) else None
@@ -1380,10 +1419,12 @@ class AlterLab(ResearchMixin, ParityMixin):
     @overload
     async def scrape(
         self, url: str, *args: Any, sync: Literal[False], **kwargs: Any
-    ) -> ScrapeAcceptedResponse: ...
+    ) -> ScrapeAcceptedResponse:
+        ...
 
     @overload
-    async def scrape(self, url: str, *args: Any, **kwargs: Any) -> Dict[str, Any]: ...
+    async def scrape(self, url: str, *args: Any, **kwargs: Any) -> Dict[str, Any]:
+        ...
 
     async def scrape(
         self,
@@ -2136,7 +2177,7 @@ class AlterLab(ResearchMixin, ParityMixin):
                 return parse_action_results(job.get("result", job))
             elif status in _JOB_STATUS_FAILED:
                 error = job.get("error", f"Job ended with status '{status}'")
-                raise JobFailedError(job_id, status, error)
+                raise JobFailedError(job_id, status, error, job.get("next_action"))
             elif status in _JOB_STATUS_IN_PROGRESS:
                 # Continue polling
                 pass
@@ -2332,7 +2373,9 @@ class AlterLab(ResearchMixin, ParityMixin):
         if since is not None:
             params["since"] = since
         if params:
-            response = await self._request_with_retry("GET", "/api/v1/usage", params=params)
+            response = await self._request_with_retry(
+                "GET", "/api/v1/usage", params=params
+            )
         else:
             response = await self._request_with_retry("GET", "/api/v1/usage")
 
@@ -3850,10 +3893,12 @@ class AlterLabSync:
     @overload
     def scrape(
         self, url: str, *args: Any, sync: Literal[False], **kwargs: Any
-    ) -> ScrapeAcceptedResponse: ...
+    ) -> ScrapeAcceptedResponse:
+        ...
 
     @overload
-    def scrape(self, *args: Any, **kwargs: Any) -> Dict[str, Any]: ...
+    def scrape(self, *args: Any, **kwargs: Any) -> Dict[str, Any]:
+        ...
 
     def scrape(self, *args, **kwargs):
         """Synchronous version of scrape()."""
